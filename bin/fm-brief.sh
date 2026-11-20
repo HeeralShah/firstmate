@@ -14,9 +14,11 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab] [--session <id>]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   --session <id> inlines data/sessions/<id>.md (task-level instructions that span
+#   repos; bin/fm-sessions.sh) into the `# Task` section; a missing file is an error.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
@@ -235,6 +237,7 @@ UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 PROJECT_DIR=
 PROJECT_DIR_SET=0
+SESSION_ID=
 POS=()
 want_value=
 for a in "$@"; do
@@ -251,6 +254,7 @@ for a in "$@"; do
       pr) PR_TEXT=$a; PR_TEXT_SET=1 ;;
       upstream-consent) UPSTREAM_CONSENT=$a; UPSTREAM_CONSENT_SET=1 ;;
       project) PROJECT_DIR=$a; PROJECT_DIR_SET=1 ;;
+      session) SESSION_ID=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -277,6 +281,8 @@ for a in "$@"; do
     --upstream-consent=*) UPSTREAM_CONSENT=${a#--upstream-consent=}; UPSTREAM_CONSENT_SET=1 ;;
     --project) want_value="project" ;;
     --project=*) PROJECT_DIR=${a#--project=}; PROJECT_DIR_SET=1 ;;
+    --session) want_value=session ;;
+    --session=*) SESSION_ID=${a#--session=} ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -649,6 +655,21 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 {FIRSTMATE_SPEC}
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
+
+# Optional session instructions: task-level guidance that spans repos, kept in
+# data/sessions/<id>.md (bin/fm-sessions.sh). Inlined so the worker needs no
+# path outside its worktree; a named session with no file is a loud error, never
+# a silently missing section.
+if [ -n "$SESSION_ID" ]; then
+  SESSION_FILE="${FM_DATA_OVERRIDE:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/data}/sessions/$SESSION_ID.md"
+  [ -r "$SESSION_FILE" ] || { echo "error: --session $SESSION_ID has no readable $SESSION_FILE (create it with bin/fm-sessions.sh add)" >&2; exit 1; }
+  TASK_SECTION="$TASK_SECTION
+
+## Session instructions ($SESSION_ID)
+Task-level guidance that applies across every repo in this session. The repo's own AGENTS.md or CLAUDE.md still governs that repo's conventions and wins on any conflict about repo mechanics.
+
+$(cat "$SESSION_FILE")"
+fi
 
 # One shared string keeps the ship and scout infrastructure rule identical.
 # Rule 2 governs file edits, so it does not prohibit pool administration.

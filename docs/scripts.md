@@ -187,6 +187,11 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-public-followup-emit.sh` | Validate and report one typed terminal work result into its owning home, or stage it when that home is remote |
 | `fm-public-followup-collect.sh` | Read and retire the typed terminal results a remote work home staged for the home that owes the public reply |
 | `fm-inbox.sh`            | The captain's out-of-band capture surface: queue a note (optionally idempotent by request id), announce or repair its wake, record a durable primary reply, and emit bounded receipts and primary-readiness JSON |
+| `fm-intake.sh`           | Fire-and-forget intake: model-free capture to a durable log, tool-less triage, delivery into the right session's inbox, and a fidelity audit ([intake.md](intake.md)) |
+| `fm-intake-hook.sh`      | Claude Code `UserPromptSubmit` hook that queues and blocks prefixed prompts and passes everything else through |
+| `fm-sessions.sh`         | Manage the sessions registry: named lanes of work spanning projects, each backed by the primary or a secondmate |
+| `fm-sessions-lib.sh`     | Sessions registry parser and home resolution shared by intake and `fm-sessions.sh` |
+| `fm-projects-root.sh`    | Point `projects/` at a shared parent folder such as `~/Projects`, and scan it for unregistered repos |
 | `fm-mail.sh`             | General-purpose mail plane: read unseen IMAP mail, send one SMTP message, or surface new mail as a `check` wake via `poll` (configuration in the home's gitignored `.env`) |
 | `fm-mail.py`             | The IMAP/SMTP engine behind `fm-mail.sh` |
 | `fm-mail-check.sh`       | Standing received-mail poll: `arm` registers a watcher check that runs `fm-mail.sh poll` on the watcher cadence (new mail still wakes via the poll; the check's own line also wakes unless the poll is a proven no-op), `disarm` removes it |
