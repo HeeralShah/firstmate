@@ -19,7 +19,8 @@
 # stub by `add` and edited by the captain. They apply across every repo in the
 # session (repo AGENTS.md/CLAUDE.md stays the repo-maintainer layer). Pass
 # `--session <id>` to bin/fm-brief.sh to inline them into a worker brief; `remove`
-# leaves the file in place.
+# leaves the file in place. The directory data/sessions/<id>/ holds plan.md and
+# summary.md, which the dashboard and state card read (bin/fm-dashboard.sh).
 #
 # `add` records the route only. It never creates or launches a secondmate; to
 # back a session with its own home, provision the secondmate first (skill
@@ -83,7 +84,7 @@ cmd_add() {
   file=$(sessions_registry_path)
   printf -- '- %s - %s (kind: %s; repos: %s; home: %s; added %s)\n' \
     "$id" "$summary" "$kind" "$repos" "$home" "$(date +%Y-%m-%d)" >>"$file"
-  mkdir -p "$DATA/sessions"
+  mkdir -p "$DATA/sessions/$id"
   local ifile
   ifile=$(sessions_instructions_path "$id")
   if [ ! -e "$ifile" ]; then

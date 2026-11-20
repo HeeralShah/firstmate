@@ -191,6 +191,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-intake-hook.sh`      | Claude Code `UserPromptSubmit` hook that queues and blocks prefixed prompts and passes everything else through |
 | `fm-sessions.sh`         | Manage the sessions registry: named lanes of work spanning projects, each backed by the primary or a secondmate |
 | `fm-sessions-lib.sh`     | Sessions registry parser and home resolution shared by intake and `fm-sessions.sh` |
+| `fm-dashboard.sh`        | Serve the per-session dashboard (progress, decisions by UI, code changes), print a disk-derived state card for rehydration after compaction, or render a static snapshot ([session-context.md](session-context.md)) |
 | `fm-projects-root.sh`    | Point `projects/` at a shared parent folder such as `~/Projects`, and scan it for unregistered repos |
 | `fm-mail.sh`             | General-purpose mail plane: read unseen IMAP mail, send one SMTP message, or surface new mail as a `check` wake via `poll` (configuration in the home's gitignored `.env`) |
 | `fm-mail.py`             | The IMAP/SMTP engine behind `fm-mail.sh` |
