@@ -26,25 +26,14 @@ Config in the gitignored `config/`: `intake-triage` (`model`, the default, or `r
 
 ## Sending from chat or a terminal
 
-The hook is already registered in this repo's tracked `.claude/settings.json`, so it is active in every Claude Code session opened in the firstmate repo.
-To use `>>` from sessions in other repos as well, also add it to `~/.claude/settings.json` (firstmate never edits that file for you):
+The hook is registered in this repo's tracked `.claude/settings.json` and deliberately not at user level, so it runs only in Claude Code sessions opened in the firstmate repo.
+It captures only in a BOUND chat: one that `/bind-session` (or `bin/fm-session-bind.sh`) has bound to a session. Every other chat passes straight through, so `>>` in an ordinary chat is never swallowed.
 
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "/absolute/path/to/firstmate/bin/fm-intake-hook.sh" }] }
-    ]
-  }
-}
-```
-
-Both registrations can fire for one prompt in the firstmate repo; the hook passes a key built from the session id and the prompt, and `fm-intake` treats a repeat of that key within two minutes as the same message.
-
-A prompt starting with `>>` (change it in `config/intake-prefix`) is captured and blocked, and you see `Queued M-0042`; every other prompt goes to Claude untouched.
+A prompt in a bound chat that starts with `>>` (change it in `config/intake-prefix`) is captured and blocked, and you see `Queued M-0042`; every other prompt goes to Claude untouched.
 The check is a plain string comparison, and the hook fails open: if capture fails, the prompt reaches Claude and the error is shown.
+The hook's payload carries the chat id, and a repeat of the same id and prompt within two minutes is one message, so the hook can't double-capture even if it is registered twice.
 From a plain terminal, use an alias such as `alias fm='/absolute/path/to/firstmate/bin/fm-intake.sh add'`.
-Verify the block with a canary: send `>> remember the word pineapple`, then ask Claude what word you mentioned; it must not know.
+Verify the block with a canary in a bound chat: send `>> remember the word pineapple`, then ask Claude what word you mentioned; it must not know. In an unbound chat the same message must reach Claude.
 
 ## Sessions
 

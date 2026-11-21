@@ -229,6 +229,9 @@ test_handled_messages_read_as_settled_everywhere() {
 
 test_hook_dedupes_double_registration() {
   local a b
+  mkdir -p "$HOME_DIR/state/session-bindings"
+  printf 'quant\n' >"$HOME_DIR/state/session-bindings/s1"
+  printf 'quant\n' >"$HOME_DIR/state/session-bindings/s2"
   a=$(printf '{"session_id":"s1","prompt":">> same thing twice"}' | "$HOOK")
   b=$(printf '{"session_id":"s1","prompt":">> same thing twice"}' | "$HOOK")
   [ "$a" = "$b" ] || fail "two hooks for one prompt made two messages: $a / $b"
@@ -266,15 +269,19 @@ test_same_day_messages_do_not_age_new_facts() {
   pass "messages captured earlier the same day do not make a newly recorded fact stale"
 }
 
-test_hook_blocks_prefixed_only() {
+test_hook_captures_only_in_bound_chats() {
   local out
-  out=$(printf '{"prompt":">> remember pineapple"}' | "$HOOK")
-  case "$out" in *'"decision": "block"'*"Queued M-"*) ;; *) fail "prefixed prompt: $out" ;; esac
-  out=$(printf '{"prompt":"hello, normal chat"}' | "$HOOK")
+  mkdir -p "$HOME_DIR/state/session-bindings"
+  printf 'quant\n' >"$HOME_DIR/state/session-bindings/bound-chat"
+  out=$(printf '{"session_id":"bound-chat","prompt":">> remember pineapple"}' | "$HOOK")
+  case "$out" in *'"decision": "block"'*"Queued M-"*) ;; *) fail "bound chat prefixed prompt not captured: $out" ;; esac
+  out=$(printf '{"session_id":"unbound-chat","prompt":">> an ordinary chat must not capture"}' | "$HOOK")
+  [ -z "$out" ] || fail "an UNBOUND chat captured a prefixed prompt: $out"
+  out=$(printf '{"session_id":"bound-chat","prompt":"hello, normal chat"}' | "$HOOK")
   [ -z "$out" ] || fail "touched a normal prompt: $out"
-  out=$(printf '{"prompt":">> nested"}' | FM_INTAKE_TRIAGE=1 "$HOOK")
+  out=$(printf '{"session_id":"bound-chat","prompt":">> nested"}' | FM_INTAKE_TRIAGE=1 "$HOOK")
   [ -z "$out" ] || fail "hook recursed inside the triage call"
-  pass "hook blocks only prefixed prompts and is a no-op inside triage"
+  pass "the hook captures prefixed prompts only in a bound chat; unbound chats, normal prompts and triage pass through"
 }
 
 test_log_is_valid_json_lines() {
@@ -305,5 +312,5 @@ fm_test_run \
   test_concurrent_triage_applies_once \
   test_session_clone_starts_on_default_branch \
   test_same_day_messages_do_not_age_new_facts \
-  test_hook_blocks_prefixed_only \
+  test_hook_captures_only_in_bound_chats \
   test_log_is_valid_json_lines

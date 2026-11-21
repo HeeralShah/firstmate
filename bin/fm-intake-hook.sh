@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-intake-hook.sh - Claude Code UserPromptSubmit hook: queue-and-block.
 #
-# Registered by the captain in ~/.claude/settings.json (this script never edits
+# Registered in the tracked .claude/settings.json (this script never edits
 # settings itself; `fm-intake.sh` docs show the snippet). On every prompt Claude
 # Code runs this with the prompt as JSON on stdin. A plain string comparison, not
 # a model decision, picks the path:
@@ -19,10 +19,11 @@
 # Fails open: if anything goes wrong the prompt passes through and the captain
 # is told, because swallowing a prompt silently is worse than a normal turn.
 #
-# Registered once in the tracked .claude/settings.json (sessions in this repo).
-# Registering it in ~/.claude/settings.json as well, for other repos, is safe:
-# both hooks see the same session id and prompt, and fm-intake dedupes that key
-# within two minutes, so one prompt is one message.
+# Only a BOUND chat captures. A chat counts as bound when
+# state/session-bindings/<session_id> exists (written by /bind-session, see
+# bin/fm-session-bind.sh). Every other chat passes straight through, so `>>` in an
+# ordinary chat is never swallowed. Registered in the tracked .claude/settings.json;
+# it is deliberately NOT registered at user level.
 set -uo pipefail
 
 [ "${FM_INTAKE_TRIAGE:-}" = 1 ] && exit 0
@@ -34,6 +35,19 @@ export FM_HOME
 command -v python3 >/dev/null 2>&1 || exit 0
 
 payload=$(cat)
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# Bound-chat gate: the chat id comes from the hook payload (the same id Claude
+# Code exposes as CLAUDE_CODE_SESSION_ID). No binding, no capture.
+chat=$(printf '%s' "$payload" | python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin).get("session_id") or "")
+except Exception:
+    pass
+' 2>/dev/null)
+case "$chat" in ''|.*|*[!A-Za-z0-9._-]*) exit 0 ;; esac
+[ -s "$STATE/session-bindings/$chat" ] || exit 0
+
 prefix="${FM_INTAKE_PREFIX:-}"
 if [ -z "$prefix" ] && [ -r "$FM_HOME/config/intake-prefix" ]; then
   prefix=$(sed -n '1{s/[[:space:]]*$//;p;q;}' "$FM_HOME/config/intake-prefix")
