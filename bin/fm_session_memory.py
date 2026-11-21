@@ -5,15 +5,24 @@ The script owns the mechanical parts only: entry markers, dedupe, ageing,
 review cadence, and a cold archive. Judgment (what is worth remembering, what to
 merge or rewrite) stays with the agent, exactly as in the stow skill.
 
+Entry markers and horizons are the stow skill's (.agents/skills/stow/SKILL.md), reused unchanged.
 Entry markers reuse the stow format as trailing HTML comments:
   <!--a:YYYY-MM-DD-->   aging   (last-reinforced date)
   <!--p:YYYY-MM-DD-->   perishable
   <!--P-->              pinned: never ages
   <!--t:NAME-->         pending capture to an external tier: never archived
-Aging entries go stale after `memory-stale-after` (default 30d) and perishable
-ones after 14d; stale entries are MOVED to memory-archive.md, never deleted.
-Cadence and style live in the session guide as `key: value` lines before the
-first heading (memory-review-every, memory-stale-after).
+Staleness follows stow's own pattern of two horizons, "whichever is reached
+first", but the second horizon is session ACTIVITY (messages captured for the
+session since the entry was last reinforced), not a pass count, because a busy
+session outruns any calendar window. The day horizon stays only as a floor for
+quiet sessions, where facts rot with time rather than with traffic. Size is a
+third trigger: memory over `memory-max-words` is due for review. Stale entries
+are MOVED to memory-archive.md, never deleted.
+Settings are `key: value` lines above the first `##` heading of the session guide:
+  memory-review-every-messages (40)   memory-review-every-days (14)
+  memory-stale-after-messages (120)   memory-stale-after-days (30)
+  memory-max-words (600)
+Perishable entries use a quarter of the message horizon and stow's 7 days.
 """
 import os
 import re
@@ -66,12 +75,33 @@ def parse_days(v, default):
 
 def guide_setting(sid, key, default):
     for line in read_lines(path(sid, "guide.md")):
-        if line.startswith("#"):
-            break
+        if line.startswith("## "):
+            break  # settings sit above the first section heading
         m = re.match(r"^%s:\s*(.+)$" % re.escape(key), line)
         if m:
             return m[1].strip()
     return default
+
+
+def int_setting(sid, key, default):
+    try:
+        return int(guide_setting(sid, key, str(default)))
+    except ValueError:
+        return default
+
+
+def session_messages(sid):
+    """[date] of every intake message captured for this session (log is the record)."""
+    out = []
+    for it in fi.derive():
+        tri = it["triage"] or {}
+        if (tri.get("session") or it.get("forced_session") or "primary") == sid:
+            out.append(datetime.strptime(it["captured_at"][:10], "%Y-%m-%d").date())
+    return out
+
+
+def memory_words(sid):
+    return sum(len(l.split()) for l in read_lines(path(sid, "memory.md")) if l.startswith("- "))
 
 
 def entries(sid):
@@ -93,15 +123,18 @@ def entries(sid):
 
 
 def stale(sid):
-    after = parse_days(guide_setting(sid, "memory-stale-after", "30d"), 30)
+    days_after = int_setting(sid, "memory-stale-after-days", 30)
+    msgs_after = int_setting(sid, "memory-stale-after-messages", 120)
+    msgs = session_messages(sid)
+    lines = read_lines(path(sid, "memory.md"))
     res = []
     for i, tier, d, text in entries(sid):
-        if tier == "pinned" or d is None:
+        if tier == "pinned" or d is None or PENDING.search(lines[i]):
             continue
-        if PENDING.search(text) or PENDING.search(read_lines(path(sid, "memory.md"))[i]):
-            continue
-        limit = 14 if tier == "perishable" else after
-        if (TODAY - d).days > limit:
+        quiet_days = 7 if tier == "perishable" else days_after
+        quiet_msgs = max(1, msgs_after // 4) if tier == "perishable" else msgs_after
+        since = sum(1 for m in msgs if m >= d)
+        if (TODAY - d).days > quiet_days or since >= quiet_msgs:
             res.append((i, tier, d, text))
     return res
 
@@ -148,21 +181,36 @@ def cmd_list(sid, args):
 
 
 def last_review(sid):
+    """(date, messages-at-review) from the stamp, or (None, 0)."""
     try:
         with open(path(sid, ".last-review")) as f:
-            return datetime.strptime(f.read().strip(), "%Y-%m-%d").date()
-    except (OSError, ValueError):
-        return None
+            parts = f.read().split()
+        return datetime.strptime(parts[0], "%Y-%m-%d").date(), int(parts[1]) if len(parts) > 1 else 0
+    except (OSError, ValueError, IndexError):
+        return None, 0
 
 
 def review_status(sid):
-    """(due: bool, message) from the guide's cadence and the last-review stamp."""
-    every = parse_days(guide_setting(sid, "memory-review-every", "7d"), 7)
-    lr = last_review(sid)
+    """(due, message): due on activity, size, or (as a floor) calendar time, whichever first."""
+    every_msgs = int_setting(sid, "memory-review-every-messages", 40)
+    every_days = int_setting(sid, "memory-review-every-days", 14)
+    max_words = int_setting(sid, "memory-max-words", 600)
+    lr, at_count = last_review(sid)
+    total = len(session_messages(sid))
+    words = memory_words(sid)
+    why = []
     if lr is None:
-        return True, "memory has never been reviewed (cadence: every %dd)" % every
-    gap = (TODAY - lr).days
-    return gap >= every, "last reviewed %dd ago (cadence: every %dd)" % (gap, every)
+        why.append("never reviewed")
+    else:
+        if total - at_count >= every_msgs:
+            why.append("%d messages since the last review (limit %d)" % (total - at_count, every_msgs))
+        if (TODAY - lr).days >= every_days:
+            why.append("%d days since the last review (floor %d)" % ((TODAY - lr).days, every_days))
+    if words > max_words:
+        why.append("memory is %d words (limit %d)" % (words, max_words))
+    if why:
+        return True, "; ".join(why)
+    return False, "%d messages and %d words since/in the last review (limits %d / %d)" % (total - at_count, words, every_msgs, max_words)
 
 
 def cmd_review(sid, args):
@@ -173,15 +221,15 @@ def cmd_review(sid, args):
     for _, tier, d, text in st:
         print("stale (%s, %s): %s" % (tier, d, text[:100]))
     if due or st:
-        print("Curate with the stow rules: merge duplicates, rewrite for the current state, reinforce what still "
-              "holds, then run `fm-session-memory.sh reviewed %s` (and `archive-stale` for the stale ones)." % sid)
+        print("Run /stow (it covers this session's memory under the same tier rules), reinforce what still holds, "
+              "then `fm-session-memory.sh archive-stale %s` for the stale ones and `fm-session-memory.sh reviewed %s`." % (sid, sid))
     return 0 if not due else 0
 
 
 def cmd_reviewed(sid, args):
     need_session(sid)
     with open(path(sid, ".last-review"), "w") as f:
-        f.write(TODAY.isoformat() + "\n")
+        f.write("%s %d\n" % (TODAY.isoformat(), len(session_messages(sid))))
     print("review recorded for %s" % TODAY.isoformat())
     return 0
 

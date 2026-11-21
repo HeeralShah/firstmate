@@ -158,14 +158,23 @@ test_unroutable_session_fails_visibly() {
 
 test_answered_decision_is_logged_to_decisions_file() {
   local out
-  printf '2026-11-20T10:05:00Z needs-decision [key=D3]: Use log or simple returns?\n' >"$SM_HOME/state/sharpe.status"
+  cat >"$TMP_ROOT/snap.sh" <<'SNAP'
+#!/usr/bin/env bash
+printf '{"tasks":[{"id":"sharpe","kind":"ship","project":"repoa","current_state":{"state":"needs-decision"},"hints":{"open_decisions":[{"key":"D3","verb":"needs-decision","summary":"Use log or simple returns?"}]}}],"backlog":{"records":[]}}\n'
+SNAP
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s/send.log"\n' "$TMP_ROOT" >"$TMP_ROOT/send.sh"
+  chmod +x "$TMP_ROOT/snap.sh" "$TMP_ROOT/send.sh"
+  export FM_SNAPSHOT_BIN="$TMP_ROOT/snap.sh" FM_SEND_BIN="$TMP_ROOT/send.sh"
   "$INTAKE" add "@quant D3: simple returns" >/dev/null
   "$INTAKE" triage M-0006
+  unset FM_SNAPSHOT_BIN FM_SEND_BIN
   out=$(cat "$HOME_DIR/data/sessions/quant/decisions.md")
   case "$out" in *"D3: simple returns"*"[asked: Use log or simple returns?]"*"(M-0006)"*) ;; *) fail "decisions.md: $out" ;; esac
+  grep -q "fm-sharpe --resolve-key D3 simple returns" "$TMP_ROOT/send.log" || fail "explicit rule answer was not applied through fm-send"
+  case "$("$INTAKE" show M-0006)" in *applied*) ;; *) fail "message not marked applied" ;; esac
   "$INTAKE" route M-0006 quant >/dev/null
   [ "$(grep -c '(M-0006)' "$HOME_DIR/data/sessions/quant/decisions.md")" = 1 ] || fail "decision recorded twice"
-  pass "an answered decision is appended once to decisions.md with the question it answered"
+  pass "an explicit decision answer is applied through fm-send, and recorded once in decisions.md with its question"
 }
 
 test_session_memory_tiers_decay_and_cadence() {
@@ -181,16 +190,24 @@ test_session_memory_tiers_decay_and_cadence() {
   grep -q OLD_FACT "$sd/memory.md" && fail "stale entry still in memory"
   grep -q PINNED_FACT "$sd/memory.md" || fail "pinned entry lost"
   "$mem" reviewed quant >/dev/null
-  case "$("$mem" review quant)" in *"review not due"*) ;; *) fail "cadence ignored after review" ;; esac
+  case "$("$mem" review quant)" in *"review not due"*) ;; *) fail "review still due right after a review" ;; esac
+  sed -i.bak 's/^memory-review-every-messages:.*/memory-review-every-messages: 2/' "$sd/guide.md"
+  "$INTAKE" add --session quant "activity one" >/dev/null
+  "$INTAKE" add --session quant "activity two" >/dev/null
+  case "$("$mem" review quant)" in *"REVIEW DUE"*"2 messages since the last review"*) ;; *) fail "activity did not make the review due: $("$mem" review quant)" ;; esac
+  "$mem" reviewed quant >/dev/null
+  sed -i.bak 's/^memory-max-words:.*/memory-max-words: 3/' "$sd/guide.md"
+  case "$("$mem" review quant)" in *"REVIEW DUE"*"memory is"*"words (limit 3)"*) ;; *) fail "size did not make the review due" ;; esac
+  sed -i.bak 's/^memory-max-words:.*/memory-max-words: 600/' "$sd/guide.md"
   "$mem" guide quant add "Answer outcome-first" >/dev/null
   grep -q "Answer outcome-first" "$sd/guide.md" || fail "guide rule not recorded"
-  pass "session memory dedupes, archives stale entries without deleting, honours pins, and tracks review cadence"
+  pass "session memory dedupes, archives stale entries without deleting, honours pins, and makes a review due on activity or size"
 }
 
 test_hook_blocks_prefixed_only() {
   local out
   out=$(printf '{"prompt":">> remember pineapple"}' | "$HOOK")
-  case "$out" in *'"decision": "block"'*"Queued M-0007"*) ;; *) fail "prefixed prompt: $out" ;; esac
+  case "$out" in *'"decision": "block"'*"Queued M-"*) ;; *) fail "prefixed prompt: $out" ;; esac
   out=$(printf '{"prompt":"hello, normal chat"}' | "$HOOK")
   [ -z "$out" ] || fail "touched a normal prompt: $out"
   out=$(printf '{"prompt":">> nested"}' | FM_INTAKE_TRIAGE=1 "$HOOK")

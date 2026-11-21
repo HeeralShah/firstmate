@@ -101,6 +101,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Captain preferences and optional shared captain preferences.
 - Learnings, backlog, briefs, scout reports, optional task status archives, and the optional per-task no-mistakes pipeline-spend ledger.
 - Explicitly installed content-addressed extension packages under `data/extensions/packages/`.
+- Optional sessions: `data/sessions.md` and one folder per session under `data/sessions/<id>/` ([intake.md](intake.md), [session-context.md](session-context.md)).
 
 `state/` holds runtime records:
 
@@ -112,13 +113,24 @@ Each effective `FM_HOME` contains private operational directories.
 - One-shot Bearings reconcile requests under `state/reconcile-notify/`.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
+- The optional fire-and-forget intake log, message bodies and dashboard snapshot under `state/intake/` (`bin/fm-intake.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
-`projects/` holds local project clones.
+`projects/` holds local project clones, flat as `projects/<repo>` or, for a session, per-session clones at `projects/<repo>/<session>` (`bin/fm-session-checkout.sh`, which `bin/fm-fleet-sync.sh` can refresh by `projects/<repo>/<session>` path).
 Firstmate reads these clones, but changes them only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
+
+Optional session, intake and dashboard settings, all local and gitignored, are read only by the scripts named in [intake.md](intake.md); absent means the feature is off or uses its default:
+
+| File | Meaning |
+| --- | --- |
+| `config/projects-source` | Folder repos are discovered in and session clones are made from (`bin/fm-projects-root.sh`); never written to |
+| `config/active-session` | The session this chat belongs to; the session-start digest, including on re-emit after compaction, then prints that session's state card |
+| `config/intake-prefix` | Prefix the `UserPromptSubmit` intake hook captures (default `>>`) |
+| `config/intake-triage`, `config/intake-triage-model` | `model` (default) or `rules` for intake triage, and an optional model id |
+| `config/dashboard-port` | Port for `bin/fm-dashboard.sh serve` (default 8787) |
 
 ### Format and lifecycle references
 

@@ -83,42 +83,40 @@ def home_state(sid):
     return os.path.join(home or fi.FM_HOME, "state")
 
 
+def session_repo_set(sid):
+    info = session_info(sid)
+    if not info or info["repos"] == "*":
+        return None  # whole home
+    return {r.strip() for r in info["repos"].split(",") if r.strip()}
+
+
 def workers(sid):
-    """Last status line per task in the session's home, newest first."""
-    out, st = [], home_state(sid)
-    try:
-        names = [n for n in os.listdir(st) if n.endswith(".status")]
-    except OSError:
-        return out
-    for n in names:
-        p = os.path.join(st, n)
-        last = ""
-        for line in read_text(p, 200000).splitlines():
-            if line.strip():
-                last = line.strip()
-        m = re.search(r"\b(needs-decision|working|blocked|paused|done|failed|resolved|fix-review|checks-passed)\b[^:]*:?\s*(.*)$", last)
-        out.append({"task": n[:-7], "state": (m[1] if m else "unknown"), "text": (m[2] if m else last)[:300],
-                    "age": int(time.time() - os.path.getmtime(p)), "line": last})
+    """Current worker state from the fleet snapshot (not a status-log tail), newest first."""
+    home, _ = fi.session_home(sid)
+    repos = session_repo_set(sid)
+    out = []
+    for t in fi.fleet_snapshot(home or fi.FM_HOME).get("tasks") or []:
+        if repos is not None and t.get("project") and t["project"] not in repos:
+            continue
+        cs = t.get("current_state") or {}
+        hints = t.get("hints") or {}
+        out.append({"task": t.get("id"), "kind": t.get("kind"), "state": cs.get("state") or "unknown",
+                    "text": (cs.get("detail") or hints.get("last_event_text") or "")[:300],
+                    "age": (((t.get("paths") or {}).get("status_log") or {}).get("age_seconds")) or 0,
+                    "project": t.get("project") or ""})
     return sorted(out, key=lambda w: w["age"])
 
 
 def decisions(sid):
-    """Open decision keys (needs-decision lines) minus those answered via intake."""
-    answered = set()
+    """Open decisions from the snapshot (worker keys and captain holds), minus any
+    whose answer is already logged but not yet applied, which show as pending."""
+    home, _ = fi.session_home(sid)
+    pending = set()
     for i in fi.derive():
         tri = i["triage"] or {}
-        if tri.get("kind") == "decision-answer":
-            answered.add(tri.get("ref"))
-        else:  # not triaged yet: the captured text itself already names the key
-            m = fi.PREFIX_DECISION.match(re.sub(r"^@\S+\s+", "", fi.read_body(i["id"]).strip()))
-            if m:
-                answered.add(m[1] or m[2])
-    out = []
-    for w in workers(sid):
-        m = re.search(r"needs-decision.*?\[key=([^\]]+)\]\s*:?\s*(.*)", w["line"])
-        if m and m[1] not in answered:
-            out.append({"key": m[1], "task": w["task"], "text": m[2][:600] or w["text"]})
-    return out
+        if tri.get("kind") == "decision-answer" and i["state"] not in ("applied", "closed", "acked"):
+            pending.add(tri.get("ref"))
+    return [dict(d, pending=d["key"] in pending) for d in fi.open_decisions(home or fi.FM_HOME)]
 
 
 def session_items(sid):
@@ -223,7 +221,7 @@ def card(sid, rehydrate=False):
     if f["decisions"]:
         L.append("\n## Open decisions (answer via the dashboard or `D<n>: ...` intake)")
         for d in f["decisions"]:
-            L.append("- %s (task %s): %s" % (d["key"], d["task"], d["text"][:200]))
+            L.append("- %s (task %s)%s: %s" % (d["key"], d["task"], " [answer logged, not yet applied]" if d.get("pending") else "", d["text"][:200]))
     if f["open_items"]:
         L.append("\n## Open intake messages")
         for i in f["open_items"][-10:]:
@@ -294,7 +292,7 @@ async function post(path,body){const r=await fetch(path,{method:'POST',headers:{
  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
 async function decide(key,btn){const box=btn.closest('.dec');const ans=box.querySelector('textarea').value.trim()||btn.dataset.ans||'';
  if(!ans){alert('Write an answer first');return}
- btn.disabled=true;try{const j=await post('/api/decision',{session:sid,key:key,answer:ans});box.innerHTML='<b>Sent '+j.id+'</b> for '+key+'. It is in the log and routed to the session.'}catch(e){alert('Failed: '+e.message);btn.disabled=false}}
+ btn.disabled=true;try{const j=await post('/api/decision',{session:sid,key:key,answer:ans});box.innerHTML='<b>'+(j.state==='applied'?'Applied':'Logged')+' '+j.id+'</b> for '+key+'. '+(j.state==='applied'?'The decision is closed.':'Not applied automatically ('+(j.error||j.state)+'); it was routed to the session instead.')}catch(e){alert('Failed: '+e.message);btn.disabled=false}}
 async function note(btn){const t=document.getElementById('note').value.trim();if(!t)return;btn.disabled=true;
  try{const j=await post('/api/note',{session:sid,text:t});document.getElementById('note').value='';document.getElementById('noteout').textContent='Queued '+j.id}catch(e){alert('Failed: '+e.message)}btn.disabled=false}
 const born=Date.now();
@@ -343,6 +341,9 @@ def page_live(f):
         parts.append('<div class="mut">No plan yet. Add steps to <code>data/sessions/%s/plan.md</code> as <code>- [ ] step</code> (<code>[~]</code> review, <code>[!]</code> blocked, <code>[x]</code> accepted).</div>' % e(f["id"]))
     parts.append("<h2>Decisions <span class='pill p-warn'>%d need your call</span></h2>" % len(f["decisions"]))
     for d in f["decisions"]:
+        if d.get("pending"):
+            parts.append('<div class="box dec"><b>%s</b> <span class="mut">task %s</span><pre>%s</pre><span class="pill p-warn">answer logged, waiting to be applied</span></div>' % (e(d["key"]), e(d["task"]), e(d["text"])))
+            continue
         parts.append('<div class="box dec"><b>%s</b> <span class="mut">task %s</span><pre>%s</pre>'
                      '<textarea rows="2" placeholder="Your decision (this is sent to the session and logged)"></textarea>'
                      '<button onclick="decide(%s,this)">Send decision</button>'
@@ -365,7 +366,7 @@ def page_live(f):
     parts.append("<h2>Workers</h2>")
     if f["workers"]:
         parts.append("<table><tr><th>Task</th><th>State</th><th>Latest</th><th>Age</th></tr>%s</table>" % "".join(
-            "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (e(w["task"]), pill(w["state"]), e(w["text"][:160]), age(w["age"]))
+            "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (e(w["task"]), pill(w["state"]), e(w["text"][:160]), age(w["age"]) if w["age"] else "")
             for w in f["workers"]))
     else:
         parts.append('<div class="mut">No workers recorded for this session.</div>')
@@ -466,13 +467,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": "empty"})
         else:
             return self._json(404, {"error": "no such endpoint"})
-        env_args = ["--source", extra, "--session", sid, "-"]
-        r = subprocess.run([sys.executable, os.path.join(fi.SELF_DIR, "fm_intake.py"), "add"] + env_args,
+        intake = os.path.join(fi.SELF_DIR, "fm_intake.py")
+        r = subprocess.run([sys.executable, intake, "add", "--source", extra, "--session", sid, "--no-triage", "-"],
                            input=text, capture_output=True, text=True, env=dict(os.environ))
         m = re.search(r"Queued (M-\d+)", r.stdout)
         if r.returncode != 0 or not m:
             return self._json(500, {"error": (r.stderr or r.stdout).strip()[:200]})
-        return self._json(200, {"id": m[1]})
+        if extra == "dashboard":
+            fi.spawn_triage(m[1])  # a note is fire-and-forget
+            return self._json(200, {"id": m[1], "state": "queued"})
+        # A decision is applied now, through upstream's own answer paths, so the page can say what happened.
+        subprocess.run([sys.executable, intake, "triage", m[1]], capture_output=True, text=True, env=dict(os.environ))
+        it = next((i for i in fi.derive() if i["id"] == m[1]), {})
+        err = it.get("last_error") if it.get("state") != "applied" else None
+        return self._json(200, {"id": m[1], "state": it.get("state"), "error": err})
 
 
 def cmd_serve(args):

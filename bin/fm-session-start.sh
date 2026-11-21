@@ -1057,6 +1057,24 @@ print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+# Sessions (opt-in, silent when unused): the captain's named lanes of work, and for
+# a chat that belongs to one session (config/active-session) its state card,
+# rebuilt from disk. This section is printed on /clear and compaction too (the
+# --reemit path), so a compacted chat resumes from facts, not from memory.
+# docs/session-context.md owns the contract.
+if [ -s "$DATA/sessions.md" ]; then
+  print_file_or_absent "$DATA/sessions.md" "data/sessions.md"
+fi
+if [ -r "$CONFIG/active-session" ]; then
+  SESSION_ACTIVE=$(sed -n '1{s/[[:space:]]*$//;p;q;}' "$CONFIG/active-session")
+  case "$SESSION_ACTIVE" in
+    ''|*[!A-Za-z0-9._-]*) ;;
+    *)
+      subsection "session context: $SESSION_ACTIVE (rebuilt from disk)"
+      FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-dashboard.sh" card "$SESSION_ACTIVE" --rehydrate 2>&1 || printf '(session card unavailable)\n'
+      ;;
+  esac
+fi
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step

@@ -16,6 +16,7 @@
 # Usage:
 #   fm-session-checkout.sh create <session> [<repo>...]   clone missing repos (default: the session's repos)
 #   fm-session-checkout.sh status <session>               branch, dirty and ahead state per clone
+#   fm-session-checkout.sh sync <session>                 refresh each clone through bin/fm-fleet-sync.sh
 #
 # `create` is idempotent and never touches an existing clone. It refuses an
 # unknown session, a repo outside the session's scope, or a repo with no git dir
@@ -93,8 +94,23 @@ cmd_status() {
   done
 }
 
+cmd_sync() {
+  local sid=${1:-} d r rc=0
+  [ -n "$sid" ] || die "usage: fm-session-checkout.sh sync <session>"
+  sessions_get "$sid" || die "no session '$sid'"
+  # fm-fleet-sync.sh accepts projects/<name> forms and owns the guarded
+  # fast-forward, self-heal and STUCK reporting; reuse it rather than re-implement.
+  for d in "$PROJECTS"/*/"$sid"; do
+    [ -e "$d/.git" ] || continue
+    r=$(basename "$(dirname "$d")")
+    "$SELF_DIR/fm-fleet-sync.sh" "projects/$r/$sid" || rc=1
+  done
+  return "$rc"
+}
+
 case "${1:-}" in
   create) shift; cmd_create "$@" ;;
+  sync)   shift; cmd_sync "$@" ;;
   status) shift; cmd_status "$@" ;;
-  *) die "usage: fm-session-checkout.sh {create|status} <session> ..." ;;
+  *) die "usage: fm-session-checkout.sh {create|status|sync} <session> ..." ;;
 esac

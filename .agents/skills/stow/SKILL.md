@@ -79,6 +79,13 @@ While the flag is present:
 - An existing dated marker with no `/N` reads as counter zero, so a home that opts in migrates nothing.
 - Removing the flag returns the home to the default contract on its next pass: any `/N` already written is then neither read nor advanced, and is left in place rather than rewritten.
 
+## Session memory
+
+When the session belongs to a named session (`config/active-session`, `data/sessions/<id>/`), also sweep that session's `memory.md` and `guide.md` in this same pass, under the same tier markers and horizons.
+`bin/fm-session-memory.sh` owns the mechanics (`add`, `reinforce`, `review`, `archive-stale`, `reviewed`, `guide add`); stale entries move to `memory-archive.md`, never deleted, and the declared-tier guard applies unchanged.
+Route knowledge about the task across repos to session memory, a rule about how the captain wants this session run to its guide, and everything else by the ownership rules below.
+Session memory is outside the startup-memory budget; keep it short, because the session's state card carries it into every re-emit.
+
 ## Required startup-memory pass
 
 Every `/stow` invocation performs this complete pass, even when the session contains no new finding:

@@ -3,22 +3,21 @@
 A session can run for weeks, and a chat that holds its state in memory drifts: it forgets, merges two facts, or repeats a claim that stopped being true.
 The design keeps one chat per topic by making the chat disposable: everything that matters lives on disk, scripts write the facts, and a compacted or restarted chat is rebuilt from disk instead of from its own summary of a summary.
 
-## The rules
+## What controls drift, and what each control watches
 
-1. **State lives on disk, not in the chat.** The intake log, `data/sessions/<id>/plan.md`, the session home's `state/*.status` lines, and read-only git queries are the record. Pages and cards are recomputed from them on every request, and the card now also carries the guide, decisions already made, and session memory.
-2. **Scripts write facts; the model writes only claims.** Counts, branch heads, open decisions, and message states come from scripts. The one model-authored file is `data/sessions/<id>/summary.md`, written at checkpoints, and the card labels it a claim that the facts above it override.
-3. **Rebuild, never trust, after compaction.** `fm-dashboard.sh card <id> --rehydrate` prints the session instructions plus a fresh state card behind a rule: trust this over anything remembered, and re-check any fact the card does not confirm. Wire it to a Claude Code `SessionStart` hook with matcher `compact` (and `startup`/`resume`) so every compaction ends with the card in context:
+Two different things can go wrong, and they have different clocks, so they have different controls:
 
-   ```json
-   { "hooks": { "SessionStart": [ { "matcher": "compact",
-       "hooks": [ { "type": "command",
-         "command": "FM_HOME=/abs/firstmate /abs/firstmate/bin/fm-dashboard.sh card quant --rehydrate" } ] } ] } }
-   ```
+| Problem | What drives it | Control | Trigger |
+| --- | --- | --- | --- |
+| The **chat** gets too large and starts to forget or blur facts | Context size in tokens | Compaction, then a rebuild from disk | Tokens (upstream's `config/stow-guard` `tokens=` and `config/warm-compact` `min-context-tokens=`) |
+| A **stored fact** stops being true | Time and activity | Memory decay and review | Messages and size, with days only as a floor |
 
-   Firstmate never edits `~/.claude/settings.json`; the captain adds the hook per session id.
-4. **Keep the card small.** It is capped near 700 words and lists only what is not settled: unaccepted steps, open decisions, open messages, latest worker status, and branch heads. Detail stays behind pointers (files, the log, the dashboard), so the chat carries references, not copies.
-5. **Compact early, at a checkpoint.** Before a planned compaction, update `summary.md` (and tick `plan.md`) so the claim layer is current; upstream's warm-cache compaction and `/stow` already handle timing and memory curation.
-6. **Verify at the seams.** `fm-intake.sh check` audits that no captured message is lost or stuck. A claim in `summary.md` or a worker report is evidence, not truth, until the card's facts agree with it.
+1. **State lives on disk, not in the chat.** The intake log, `data/sessions/<id>/plan.md`, the fleet snapshot, and read-only git queries are the record. Pages and cards are recomputed from them on every request.
+2. **Scripts write facts; the model writes only claims.** Counts, branch heads, open decisions and message states come from scripts. The one model-authored status file is `summary.md`, and the card labels it a claim that the facts above it override.
+3. **Rebuild, never trust, after compaction.** Upstream already re-emits context on `/clear` and compaction (`fm-sessionstart-run.sh` routes them to `fm-session-start.sh --reemit`, registered in `.claude/settings.json`). When `config/active-session` names this chat's session, that same digest includes `fm-dashboard.sh card <id> --rehydrate`: the session instructions plus a fresh state card behind a rule to trust it over remembered facts. No extra hook is needed. A secondmate home that backs a session needs `data/sessions` linked to the session folders.
+4. **Compact on size, not on a calendar.** How soon a chat is compacted is a token threshold, and it is yours to set: `config/stow-guard` (`tokens=<n>`, default 300000 context tokens) asks for a `/stow` before compaction, and `config/warm-compact` compacts an idle session. A very active captain should set `tokens=` well below the default. These are upstream's knobs and this design reuses them unchanged.
+5. **Keep the card small.** It is capped near 700 words and lists only what is unsettled; detail stays behind pointers.
+6. **Verify at the seams.** `fm-intake.sh check` audits that no captured message is lost or stuck, and a claim in `summary.md` or a worker report is evidence, not truth, until the card's facts agree.
 
 ## The layers of memory
 
@@ -37,18 +36,19 @@ Routing: knowledge about the task across repos goes to session memory; a rule ab
 
 ## Memory: tiers, decay, review
 
-`memory.md` uses the stow entry format as trailing comments: aging (`<!--a:date-->`), perishable (`<!--p:date-->`), pinned (`<!--P-->`), and pending capture (`<!--t:NAME-->`, never archived).
-`fm-session-memory.sh` owns the mechanics: it dedupes on add, `reinforce` refreshes a date, `archive-stale` moves aging entries older than `memory-stale-after` (default 30 days) and perishable ones older than 14 days to `memory-archive.md` (never deleted), and `review` reports whether a review is due and which entries are stale.
-What to remember, merge or rewrite stays the agent's judgment under the stow rules; the script only reports and moves.
+`memory.md` uses the stow entry format as trailing comments: aging (`<!--a:date-->`), perishable (`<!--p:date-->`), pinned (`<!--P-->`), and pending capture (`<!--t:NAME-->`, never archived). `/stow` covers it under the same tier rules (see the stow skill's "Session memory" section).
+Staleness follows the pattern stow's optional pass horizon already uses, "whichever is reached first", but measures session activity: an aging entry is stale after `memory-stale-after-messages` (default 120) messages captured for the session since it was last reinforced, or `memory-stale-after-days` (30) days, and a perishable one after a quarter of the message limit or 7 days. A busy session therefore decays and reviews faster than a quiet one; calendar days are only a floor for quiet sessions, where facts rot with time rather than traffic.
+A review is due on whichever comes first: `memory-review-every-messages` (40) messages since the last review, `memory-review-every-days` (14) days, or memory over `memory-max-words` (600). All five limits are `key: value` lines in the guide and the captain can set them per session.
+`fm-session-memory.sh` owns the mechanics (dedupe on add, `reinforce`, `archive-stale` to `memory-archive.md` and never deletes, `review`, `reviewed`); what to remember, merge or rewrite stays the agent's judgment under the stow rules.
 Decisions never decay: a `decided:` line stays until the captain reopens it, and the card and briefs tell the agent not to re-ask or contradict one.
 
 ## The guide
 
 `guide.md` holds meta-rules about the session itself, not the task: how the captain wants answers shaped, how work is grouped and reported, and how often memory is reviewed.
-Settings sit on `key: value` lines before the first heading (`memory-review-every: 7d`, `memory-stale-after: 30d`, `answer-style: ...`), and `fm-session-memory.sh guide <id> add "<rule>"` appends a dated rule.
+Settings sit on `key: value` lines above the first `##` heading (the five memory limits above, and `answer-style: ...`), and `fm-session-memory.sh guide <id> add "<rule>"` appends a dated rule.
 When the captain states a preference about how a session should run, the agent records it here as one line and rewrites the list down when it grows past about 25 rules, replacing superseded lines instead of piling up.
 The state card always carries the guide, so a compacted chat keeps following it.
-A due review shows on the card and the dashboard; the agent runs `review`, curates, then `reviewed`.
+A due review shows on the card and the dashboard; the agent runs `/stow`, which covers the session memory, then `fm-session-memory.sh reviewed`.
 
 ## The dashboard
 

@@ -20,8 +20,10 @@
 #
 # Mechanics only: markers, dedupe, ageing, cadence and the archive. What to
 # remember, merge or rewrite is the agent's judgment under the stow rules.
-# Cadence comes from the guide's `memory-review-every` (default 7d) and
-# `memory-stale-after` (default 30d). Stale entries are moved, never deleted.
+# Review and staleness follow session ACTIVITY (messages captured for the
+# session) and memory SIZE, with calendar days only as a floor for quiet sessions;
+# every limit is a `key: value` line in the guide. Stale entries are moved, never
+# deleted. See bin/fm_session_memory.py for the settings and defaults.
 set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 command -v python3 >/dev/null 2>&1 || { echo "fm-session-memory: python3 is required" >&2; exit 1; }

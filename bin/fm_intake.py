@@ -271,6 +271,11 @@ def derive():
             it["attempts"] += 1
             it["last_error"] = e.get("error")
             it["state"] = "delivery_failed"
+        elif ev == "applied":
+            it["state"] = "applied"
+            it["applied_at"] = e["at"]
+        elif ev == "apply_failed":
+            it["last_error"] = e.get("error")
         elif ev == "acked":
             it["state"] = "acked"
             it["acked_at"] = e["at"]
@@ -329,26 +334,80 @@ PREFIX_SESSION = re.compile(r"^@([A-Za-z0-9._-]+)\s+(.*)$", re.S)
 PREFIX_DECISION = re.compile(r"^(?:answer\s+([A-Za-z0-9_.-]+)|(D-?\d+))\s*:\s+(.*)$", re.S | re.I)
 
 
+_SNAP_CACHE = {}
+
+
+def fleet_snapshot(home):
+    """Authoritative fleet state from upstream's fm-fleet-snapshot.sh (cached 10 s).
+
+    Current worker state and open decisions come from here, never from a tail of
+    state/<id>.status, which upstream documents as a wake-event log."""
+    hit = _SNAP_CACHE.get(home)
+    if hit and time.time() - hit[0] < 10:
+        return hit[1]
+    snap = {}
+    binary = os.environ.get("FM_SNAPSHOT_BIN") or os.path.join(SELF_DIR, "fm-fleet-snapshot.sh")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("FM_STATE_OVERRIDE", "FM_DATA_OVERRIDE", "FM_CONFIG_OVERRIDE", "FM_PROJECTS_OVERRIDE"))}
+    env["FM_HOME"] = home
+    try:
+        r = subprocess.run([binary, "--json"], capture_output=True, text=True, timeout=60, env=env)
+        i = r.stdout.find("{")
+        snap = json.loads(r.stdout[i:]) if i >= 0 else {}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        snap = {}
+    _SNAP_CACHE[home] = (time.time(), snap)
+    return snap
+
+
+def open_decisions(home):
+    """[{key, task, kind, text}] from the snapshot: worker needs-decision keys and captain-held tasks."""
+    snap = fleet_snapshot(home)
+    out = []
+    for t in snap.get("tasks") or []:
+        for d in (t.get("hints") or {}).get("open_decisions") or []:
+            out.append({"key": d.get("key"), "task": t.get("id"), "kind": "worker",
+                        "verb": d.get("verb"), "text": d.get("summary") or ""})
+    for r in (snap.get("backlog") or {}).get("records") or []:
+        if r.get("captain_actionable"):
+            out.append({"key": r.get("id"), "task": r.get("id"), "kind": "hold", "verb": "hold",
+                        "text": r.get("hold_reason") or r.get("title") or ""})
+    return [d for d in out if d["key"]]
+
+
+def apply_decision(home, key, answer, mid):
+    """Apply a captain's keyed answer through upstream's own paths; (ok, detail).
+
+    A worker's open decision closes with fm-send --resolve-key (answerer-closes);
+    a captain-held backlog task closes through fm-captain-hold.sh answers, the one
+    keyed-answer intake. Nothing here invents a resolution record."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("FM_STATE_OVERRIDE", "FM_DATA_OVERRIDE", "FM_CONFIG_OVERRIDE", "FM_PROJECTS_OVERRIDE"))}
+    env["FM_HOME"] = home
+    _SNAP_CACHE.pop(home, None)
+    match = next((d for d in open_decisions(home) if d["key"] == key), None)
+    if match is None:
+        return False, "no open decision or captain hold with key '%s'" % key
+    if match["kind"] == "worker":
+        send = os.environ.get("FM_SEND_BIN") or os.path.join(SELF_DIR, "fm-send.sh")
+        r = subprocess.run([send, "fm-%s" % match["task"], "--resolve-key", key, answer],
+                           capture_output=True, text=True, env=env)
+    else:
+        hold = os.environ.get("FM_CAPTAIN_HOLD_BIN") or os.path.join(SELF_DIR, "fm-captain-hold.sh")
+        r = subprocess.run([hold, "answers", "--source", "intake:%s" % mid],
+                           input="%s\t%s\tintake\n" % (key, answer.replace("\t", " ").replace("\n", " ")),
+                           capture_output=True, text=True, env=env)
+    _SNAP_CACHE.pop(home, None)
+    if r.returncode != 0:
+        return False, (r.stderr.strip() or r.stdout.strip() or "exit %d" % r.returncode)[:200]
+    return True, match["kind"]
+
+
 def open_context():
     """Open messages and open decision keys the triage model may refer to."""
     open_items = [{"id": it["id"], "summary": it["summary"],
                    "session": (it["triage"] or {}).get("session")}
-                  for it in derive() if it["state"] not in ("acked", "closed")][-15:]
-    keys = []
-    try:
-        for name in sorted(os.listdir(STATE)):
-            if not name.endswith(".status"):
-                continue
-            last = ""
-            with open(os.path.join(STATE, name)) as f:
-                for line in f:
-                    if line.strip():
-                        last = line.strip()
-            m = re.search(r"needs-decision.*\[key=([^\]]+)\]", last)
-            if m:
-                keys.append({"task": name[:-7], "key": m[1]})
-    except OSError:
-        pass
+                  for it in derive() if it["state"] not in ("acked", "closed", "applied")][-15:]
+    home, _ = session_home("primary")
+    keys = [{"task": d["task"], "key": d["key"]} for d in open_decisions(home or FM_HOME)]
     return open_items, keys[:15]
 
 
@@ -468,23 +527,36 @@ def record_decision(mid, tri):
     body = " ".join(read_body(mid).split())
     body = re.sub(r"^(?:@\S+\s+)?(?:answer\s+\S+|D-?\d+)\s*:\s*", "", body, flags=re.I)
     key = tri.get("ref") or "?"
-    q = ""
     home, _ = session_home(sid)
-    try:
-        for name in os.listdir(os.path.join(home or FM_HOME, "state")):
-            if not name.endswith(".status"):
-                continue
-            with open(os.path.join(home or FM_HOME, "state", name)) as f:
-                for line in f:
-                    m = re.search(r"needs-decision.*\[key=%s\]\s*:?\s*(.*)" % re.escape(key), line)
-                    if m:
-                        q = m[1].strip()[:160]
-    except OSError:
-        pass
+    q = next((d["text"][:160] for d in open_decisions(home or FM_HOME) if d["key"] == key), "")
     line = "- %s %s: %s%s (%s)\n" % (now()[:10], key, body[:300], (" [asked: %s]" % q) if q else "", mid)
     with open(path, "w") as f:
         f.write(existing if existing.endswith("\n") else existing + "\n")
         f.write(line)
+
+
+def try_apply(it, tri):
+    """Auto-apply only an EXPLICIT answer: a rule-matched prefix or a dashboard click.
+
+    A model-triaged decision-answer is a guess, so it is delivered to the first
+    mate as a note instead. On any failure the message falls through to delivery,
+    so an answer is never lost."""
+    if tri.get("kind") != "decision-answer" or not tri.get("ref"):
+        return False
+    explicit = tri.get("by") == "rule" or it.get("source") == "dashboard-decision"
+    if not explicit:
+        return False
+    home, why = session_home(tri.get("session") or "primary")
+    if home is None:
+        return False
+    body = " ".join(read_body(it["id"]).split())
+    body = re.sub(r"^(?:@\S+\s+)?(?:answer\s+\S+|D-?\d+)\s*:\s*", "", body, flags=re.I) or body
+    ok, detail = apply_decision(home, tri["ref"], body, it["id"])
+    if ok:
+        append({"event": "applied", "id": it["id"], "ref": tri["ref"], "via": detail})
+        return True
+    append({"event": "apply_failed", "id": it["id"], "ref": tri["ref"], "error": detail})
+    return False
 
 
 def cmd_triage(args):
@@ -500,6 +572,8 @@ def cmd_triage(args):
         append(dict(tri, event="triaged", id=mid))
         record_decision(mid, tri)
         it = {i["id"]: i for i in derive()}[mid]
+        if try_apply(it, tri):
+            return 0
     if it["state"] in ("triaged", "delivery_failed"):
         deliver(it)
     return 0
@@ -591,7 +665,7 @@ def cmd_list(args):
     as_json = "--json" in args
     items = derive()
     if not show_all:
-        items = [i for i in items if i["state"] not in ("acked", "closed")]
+        items = [i for i in items if i["state"] not in ("acked", "closed", "applied")]
     if as_json:
         print(json.dumps([{k: i.get(k) for k in ("id", "state", "captured_at", "summary", "triage", "delivery")}
                           for i in items], indent=1))

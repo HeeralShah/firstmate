@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # tests/fm-dashboard.test.sh - session state card, rehydration form, dashboard page,
-# and the decision endpoint that writes to the intake log.
+# and decisions applied through upstream's own answer paths.
 #
-# Covers: the card is rebuilt from disk (plan, open decision, branch), the
-# rehydrate form tells the agent to trust the card over memory, a decision shows
-# until an answer is logged and then drops, the server refuses a POST without the
-# dashboard header, and an accepted decision lands in the log routed to the session.
+# Worker state and open decisions come from fm-fleet-snapshot.sh --json (never a
+# status-log tail), so these tests stand a fake snapshot in through FM_SNAPSHOT_BIN
+# and fake fm-send / fm-captain-hold through FM_SEND_BIN / FM_CAPTAIN_HOLD_BIN that
+# record their arguments and make the fake snapshot stop listing a closed decision.
 set -euo pipefail
 
 # shellcheck source=tests/lib.sh
@@ -16,7 +16,8 @@ DASH="$ROOT/bin/fm-dashboard.sh"
 INTAKE="$ROOT/bin/fm-intake.sh"
 HOME_DIR="$TMP_ROOT/home"
 REPOS="$TMP_ROOT/repos"
-mkdir -p "$HOME_DIR"/{state,data,config} "$REPOS/repoa"
+FAKE="$TMP_ROOT/fake"
+mkdir -p "$HOME_DIR"/{state,data,config} "$REPOS/repoa" "$FAKE"
 git -C "$REPOS/repoa" init -q -b main
 git -C "$REPOS/repoa" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 git -C "$REPOS/repoa" checkout -q -b fm/sharpe
@@ -25,21 +26,43 @@ git -C "$REPOS/repoa" add -A
 git -C "$REPOS/repoa" -c user.email=t@t -c user.name=t commit -q -m "add sharpe"
 git -C "$REPOS/repoa" checkout -q main
 
+# Fake snapshot: lists D4 (worker decision) and hold-1 (captain hold) until closed.
+cat >"$FAKE/snapshot.sh" <<SNAP
+#!/usr/bin/env bash
+d4='{"key":"D4","verb":"needs-decision","summary":"Use log or simple returns?"}'
+[ -e "$FAKE/closed-D4" ] && d4=''
+hold='{"id":"hold-1","captain_actionable":true,"title":"Pick data vendor","hold_reason":"vendor choice"}'
+[ -e "$FAKE/closed-hold-1" ] && hold=''
+printf '{"tasks":[{"id":"sharpe","kind":"ship","project":"repoa","current_state":{"state":"needs-decision","detail":"waiting on a call"},"hints":{"open_decisions":[%s],"last_event_text":""},"paths":{"status_log":{"age_seconds":120}}}],"backlog":{"records":[%s]}}\n' "\$d4" "\$hold"
+SNAP
+cat >"$FAKE/send.sh" <<SEND
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$FAKE/send.log"
+touch "$FAKE/closed-D4"
+SEND
+cat >"$FAKE/hold.sh" <<HOLD
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$FAKE/hold.log"
+cat >>"$FAKE/hold.stdin"
+touch "$FAKE/closed-hold-1"
+HOLD
+chmod +x "$FAKE"/*.sh
+
 export FM_HOME="$HOME_DIR"
 export FM_INTAKE_NO_TRIAGE=1
+export FM_SNAPSHOT_BIN="$FAKE/snapshot.sh" FM_SEND_BIN="$FAKE/send.sh" FM_CAPTAIN_HOLD_BIN="$FAKE/hold.sh"
 "$ROOT/bin/fm-projects-root.sh" set "$REPOS" >/dev/null
 "$ROOT/bin/fm-sessions.sh" add quant --summary "Quant model work" --kind theme --repos repoa >/dev/null
 printf -- '- [x] Reference data in\n- [~] Sharpe plot in review\n- [!] Vol surface blocked\n' >"$HOME_DIR/data/sessions/quant/plan.md"
-printf '2026-11-20T10:05:00Z needs-decision [key=D4]: Use log or simple returns?\n' >"$HOME_DIR/state/sharpe.status"
 
-test_card_is_rebuilt_from_disk() {
+test_card_is_rebuilt_from_disk_and_snapshot() {
   local card
   card=$("$DASH" card quant)
   case "$card" in
-    *"1 accepted, 1 in review, 1 blocked"*"D4"*"fm/sharpe: 1 ahead of main"*) ;;
+    *"1 accepted, 1 in review, 1 blocked"*"D4"*"hold-1"*"sharpe: needs-decision"*"fm/sharpe: 1 ahead of main"*) ;;
     *) fail "card missing facts: $card" ;;
   esac
-  pass "card is rebuilt from the plan, open decision and branch state on disk"
+  pass "card is rebuilt from the plan, snapshot decisions, worker state and branch state"
 }
 
 test_card_carries_guide_decisions_and_memory() {
@@ -65,6 +88,18 @@ test_rehydrate_prefers_disk_over_memory() {
   pass "rehydrate form puts instructions and the card behind a trust-disk-over-memory rule"
 }
 
+test_session_start_digest_prints_the_card() {
+  local out
+  printf 'quant\n' >"$HOME_DIR/config/active-session"
+  out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-session-start.sh" --reemit 2>&1 || true)
+  case "$out" in
+    *"session context: quant"*"Trust this over anything remembered"*) ;;
+    *) fail "digest lacks the session card: $(printf '%s' "$out" | tail -20)" ;;
+  esac
+  rm -f "$HOME_DIR/config/active-session"
+  pass "the existing session-start re-emit path prints the active session's card"
+}
+
 test_static_page_has_decision_ui() {
   local page
   page=$("$DASH" render quant)
@@ -75,7 +110,7 @@ test_static_page_has_decision_ui() {
   pass "static page renders progress, decisions with buttons, and code changes"
 }
 
-test_server_decision_flow() {
+test_server_decisions_apply_through_upstream_paths() {
   local port=$((20000 + RANDOM % 20000)) pid out code
   "$DASH" serve --port "$port" >/dev/null 2>&1 &
   pid=$!
@@ -87,17 +122,26 @@ test_server_decision_flow() {
   [ "$code" = 403 ] || { kill "$pid" 2>/dev/null; fail "POST without header returned $code"; }
   out=$(curl -s -X POST "http://127.0.0.1:$port/api/decision" -H 'X-FM-Dashboard: 1' \
     -H 'Content-Type: application/json' -d '{"session":"quant","key":"D4","answer":"simple returns"}')
-  case "$out" in *'"id": "M-0001"'*) ;; *) kill "$pid" 2>/dev/null; fail "decision not accepted: $out" ;; esac
-  case "$("$INTAKE" show M-0001)" in *"answer D4: simple returns"*) ;; *) kill "$pid" 2>/dev/null; fail "answer not in log" ;; esac
-  curl -s "http://127.0.0.1:$port/s/quant" | grep -q "Send decision" && { kill "$pid" 2>/dev/null; fail "answered decision still listed"; }
+  case "$out" in *'"state": "applied"'*) ;; *) kill "$pid" 2>/dev/null; fail "worker decision not applied: $out" ;; esac
+  grep -q "fm-sharpe --resolve-key D4 simple returns" "$FAKE/send.log" || { kill "$pid" 2>/dev/null; fail "fm-send not called with --resolve-key"; }
+  out=$(curl -s -X POST "http://127.0.0.1:$port/api/decision" -H 'X-FM-Dashboard: 1' \
+    -H 'Content-Type: application/json' -d '{"session":"quant","key":"hold-1","answer":"Use vendor B"}')
+  case "$out" in *'"state": "applied"'*) ;; *) kill "$pid" 2>/dev/null; fail "hold decision not applied: $out" ;; esac
+  grep -q "^answers --source intake:M-" "$FAKE/hold.log" || { kill "$pid" 2>/dev/null; fail "fm-captain-hold answers not called"; }
+  grep -q "hold-1.*Use vendor B" "$FAKE/hold.stdin" || { kill "$pid" 2>/dev/null; fail "keyed answer line wrong"; }
+  curl -s "http://127.0.0.1:$port/s/quant" | grep -q "Send decision" && { kill "$pid" 2>/dev/null; fail "closed decisions still listed"; }
+  out=$(curl -s -X POST "http://127.0.0.1:$port/api/decision" -H 'X-FM-Dashboard: 1' \
+    -H 'Content-Type: application/json' -d '{"session":"quant","key":"ghost","answer":"x"}')
+  case "$out" in *'"state": "delivered"'*"no open decision"*) ;; *) kill "$pid" 2>/dev/null; fail "unknown key did not fall back to delivery: $out" ;; esac
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  pass "server rejects headerless POSTs, logs a decision routed to the session, and drops it from the page"
+  pass "dashboard decisions close through fm-send --resolve-key and fm-captain-hold answers, and an unknown key falls back to delivery"
 }
 
 fm_test_run \
-  test_card_is_rebuilt_from_disk \
+  test_card_is_rebuilt_from_disk_and_snapshot \
   test_card_carries_guide_decisions_and_memory \
   test_rehydrate_prefers_disk_over_memory \
+  test_session_start_digest_prints_the_card \
   test_static_page_has_decision_ui \
-  test_server_decision_flow
+  test_server_decisions_apply_through_upstream_paths
