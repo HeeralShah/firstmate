@@ -447,11 +447,11 @@ def apply_decision(home, key, answer, mid):
     return True, match["kind"]
 
 
-def open_context():
+def open_context(exclude=None):
     """Open messages and open decision keys the triage model may refer to."""
     open_items = [{"id": it["id"], "summary": it["summary"],
                    "session": (it["triage"] or {}).get("session")}
-                  for it in derive() if it["state"] not in SETTLED][-15:]
+                  for it in derive() if it["state"] not in SETTLED and it["id"] != exclude][-15:]
     home, _ = session_home("primary")
     keys = [{"task": d["task"], "key": d["key"]} for d in open_decisions(home or FM_HOME)]
     return open_items, keys[:15]
@@ -470,9 +470,10 @@ SCHEMA = {
 }
 
 
-def model_triage(body):
+def model_triage(body, mid=None):
     sess = sessions()
-    open_items, keys = open_context()
+    # The message being triaged is never one of its own "open items".
+    open_items, keys = open_context(exclude=mid)
     prompt = (
         "You classify one captain message for a work-routing system. You cannot act, "
         "run tools or answer the message; you only label it.\n"
@@ -533,11 +534,13 @@ def classify(mid):
         return {"kind": "new", "session": "primary", "by": "fallback",
                 "note": "no model triage available"}, None
     try:
-        out = model_triage(body)
+        out = model_triage(body, mid)
         kind = out.get("kind")
         sid = out.get("session") or "primary"
         if kind not in KINDS:
             raise RuntimeError("bad kind %r" % kind)
+        if (out.get("ref") or "") == mid:
+            out["ref"] = None  # a message cannot follow up on itself
         if sid not in valid:
             sid = "primary"
         return {"kind": kind, "session": sid, "ref": out.get("ref") or None,
