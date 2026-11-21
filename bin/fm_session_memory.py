@@ -5,8 +5,11 @@ The script owns the mechanical parts only: entry markers, dedupe, ageing,
 review cadence, and a cold archive. Judgment (what is worth remembering, what to
 merge or rewrite) stays with the agent, exactly as in the stow skill.
 
-Entry markers and horizons are the stow skill's (.agents/skills/stow/SKILL.md), reused unchanged.
-Entry markers reuse the stow format as trailing HTML comments:
+Entry markers are the stow skill's (.agents/skills/stow/SKILL.md), reused
+unchanged; the day horizons match stow's (stale at >= 30 days aging, >= 7
+days perishable). The message horizon below is this layer's own addition and
+is under review; set it high in the guide to rely on days and size alone.
+Entry markers, as trailing HTML comments:
   <!--a:YYYY-MM-DD-->   aging   (last-reinforced date)
   <!--p:YYYY-MM-DD-->   perishable
   <!--P-->              pinned: never ages
@@ -63,7 +66,14 @@ def write_lines(p, lines):
     tmp = p + ".tmp"
     with open(tmp, "w") as f:
         f.write("\n".join(lines) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, p)
+
+
+def locked(sid):
+    """One writer at a time per session folder: read-modify-write is never interleaved."""
+    return fi.Locked(os.path.join(sdir(sid), ".memory.lock"))
 
 
 def parse_days(v, default):
@@ -133,13 +143,15 @@ def stale(sid):
             continue
         quiet_days = 7 if tier == "perishable" else days_after
         quiet_msgs = max(1, msgs_after // 4) if tier == "perishable" else msgs_after
-        since = sum(1 for m in msgs if m >= d)
-        if (TODAY - d).days > quiet_days or since >= quiet_msgs:
+        # Only messages AFTER the entry's day count: a busy morning must not
+        # make a fact recorded that afternoon stale. Days match stow (>=).
+        since = sum(1 for m in msgs if m > d)
+        if (TODAY - d).days >= quiet_days or since >= quiet_msgs:
             res.append((i, tier, d, text))
     return res
 
 
-def cmd_add(sid, args):
+def _cmd_add(sid, args):
     need_session(sid)
     pin = "--pin" in args
     perish = "--perishable" in args
@@ -157,7 +169,7 @@ def cmd_add(sid, args):
     return 0
 
 
-def cmd_reinforce(sid, args):
+def _cmd_reinforce(sid, args):
     need_session(sid)
     needle = " ".join(args).strip().lower()
     if not needle:
@@ -234,7 +246,7 @@ def cmd_reviewed(sid, args):
     return 0
 
 
-def cmd_archive_stale(sid, args):
+def _cmd_archive_stale(sid, args):
     need_session(sid)
     st = stale(sid)
     if not st:
@@ -252,7 +264,7 @@ def cmd_archive_stale(sid, args):
     return 0
 
 
-def cmd_guide(sid, args):
+def _cmd_guide(sid, args):
     """guide <session> add <one-line rule>: record a dated meta-rule under ## Rules."""
     need_session(sid)
     if not args or args[0] != "add" or len(args) < 2:
@@ -269,6 +281,30 @@ def cmd_guide(sid, args):
     n = sum(1 for l in lines if l.startswith("- "))
     print("rule added (%d rules)%s" % (n, "; the guide is getting long, rewrite it down to the rules that still hold" if n > 25 else ""))
     return 0
+
+
+def cmd_add(sid, args):
+    need_session(sid)
+    with locked(sid):
+        return _cmd_add(sid, args)
+
+
+def cmd_reinforce(sid, args):
+    need_session(sid)
+    with locked(sid):
+        return _cmd_reinforce(sid, args)
+
+
+def cmd_archive_stale(sid, args):
+    need_session(sid)
+    with locked(sid):
+        return _cmd_archive_stale(sid, args)
+
+
+def cmd_guide(sid, args):
+    need_session(sid)
+    with locked(sid):
+        return _cmd_guide(sid, args)
 
 
 CMDS = {"add": cmd_add, "reinforce": cmd_reinforce, "list": cmd_list, "review": cmd_review,

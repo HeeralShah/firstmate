@@ -9,7 +9,7 @@
 # docs/intake.md.
 #
 # Usage:
-#   fm-intake.sh add [--session <id>] [--no-triage] <text>...   (or: add -)
+#   fm-intake.sh add [--session <id>] [--no-triage] [--dedupe-key <k>] <text>...   (or: add -)
 #   fm-intake.sh list [--all] [--json]    open messages (all = include settled)
 #   fm-intake.sh show M-NNNN              full history and body
 #   fm-intake.sh check                    fidelity audit; exit 1 if anything is stuck

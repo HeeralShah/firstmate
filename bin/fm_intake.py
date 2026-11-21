@@ -19,7 +19,14 @@ prose). The point of this layer is that the model is never in the capture path:
             delivered and acknowledged; anything stuck past its bound is named.
 
 Events (one JSON object per line): captured, triaged, delivered,
-delivery_failed, acked, closed.
+delivery_failed, applied, apply_failed, acked, closed. A delivered message
+whose note sits in the target home's handled/ directory is derived as acked on
+every read, so no reader sees an acknowledged message as open; `sync` also
+records that as a durable `acked` event.
+
+Answered decisions are written to the session's decisions.md ONLY after
+upstream accepted them (fm-send --resolve-key or fm-captain-hold answers), so
+a typo, an unknown key, or a model's guess never becomes a "decision made".
 """
 import fcntl
 import json
@@ -48,6 +55,7 @@ KINDS = ("new", "follow-up", "decision-answer", "other")
 TRIAGE_BOUND = 120
 DELIVER_BOUND = 300
 ACK_BOUND = 3600
+DEDUPE_WINDOW = 120
 
 
 def die(msg, code=1):
@@ -77,11 +85,15 @@ def read_setting(name, default=""):
 
 
 class Locked:
-    """Exclusive lock over the intake directory: id allocation and appends."""
+    """Exclusive lock: the intake log by default, or any named lock file."""
+
+    def __init__(self, path=None):
+        self.path = path or LOCK
 
     def __enter__(self):
         os.makedirs(MSGS, exist_ok=True)
-        self.fh = open(LOCK, "a+")
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self.fh = open(self.path, "a+")
         fcntl.flock(self.fh, fcntl.LOCK_EX)
         return self
 
@@ -191,7 +203,7 @@ def secondmate_home(sm_id):
 # ------------------------------------------------------------------- capture
 
 def cmd_add(args):
-    source, session, triage = "cli", None, True
+    source, session, triage, dedupe = "cli", None, True, None
     while args and args[0].startswith("--") and args[0] != "--":
         a = args.pop(0)
         if a == "--source" and args:
@@ -200,6 +212,8 @@ def cmd_add(args):
             session = args.pop(0)
         elif a == "--no-triage":
             triage = False
+        elif a == "--dedupe-key" and args:
+            dedupe = args.pop(0)
         else:
             die("unknown option %s" % a)
     if args and args[0] == "--":
@@ -211,7 +225,16 @@ def cmd_add(args):
     if not body.strip():
         die("usage: fm-intake.sh add [--session <id>] [--source <s>] [--no-triage] <text>... (or: add -)")
     with Locked():
-        ids = [int(e["id"][2:]) for e in events() if e.get("event") == "captured" and valid_id(e.get("id"))]
+        evs = events()
+        if dedupe:
+            # The same prompt reaching two registered hooks (project and user
+            # settings) within the window is one message, not two.
+            for e in reversed(evs):
+                if e.get("event") == "captured" and e.get("dedupe") == dedupe and \
+                        time.time() - epoch(e["at"]) < DEDUPE_WINDOW:
+                    print("Queued %s" % e["id"])
+                    return 0
+        ids = [int(e["id"][2:]) for e in evs if e.get("event") == "captured" and valid_id(e.get("id"))]
         mid = "M-%04d" % ((max(ids) if ids else 0) + 1)
         tmp = tempfile.NamedTemporaryFile("w", dir=MSGS, delete=False, prefix=".stage-")
         tmp.write(body if body.endswith("\n") else body + "\n")
@@ -223,6 +246,8 @@ def cmd_add(args):
               "summary": " ".join(body.split())[:100]}
         if session:
             ev["forced_session"] = session
+        if dedupe:
+            ev["dedupe"] = dedupe
         append_locked(ev)
     write_snapshot()
     print("Queued %s" % mid)
@@ -282,7 +307,15 @@ def derive():
         elif ev == "closed":
             it["state"] = "closed"
             it["closed_at"] = e["at"]
-    return [items[m] for m in order]
+    out = [items[m] for m in order]
+    for it in out:
+        if it["state"] == "delivered" and target_acked(it):
+            it["state"] = "acked"
+            it["acked_derived"] = True
+    return out
+
+
+SETTLED = ("acked", "closed", "applied")
 
 
 def last_at(it):
@@ -300,10 +333,10 @@ def target_acked(it):
 
 
 def sync():
-    """Record `acked` for delivered messages whose target note was handled."""
+    """Record a durable `acked` event for messages derived as acked."""
     n = 0
     for it in derive():
-        if it["state"] == "delivered" and target_acked(it):
+        if it.get("acked_derived"):
             append({"event": "acked", "id": it["id"]})
             n += 1
     return n
@@ -347,14 +380,23 @@ def fleet_snapshot(home):
         return hit[1]
     snap = {}
     binary = os.environ.get("FM_SNAPSHOT_BIN") or os.path.join(SELF_DIR, "fm-fleet-snapshot.sh")
+    try:
+        limit = int(os.environ.get("FM_SNAPSHOT_TIMEOUT") or 60)
+    except ValueError:
+        limit = 60
     env = {k: v for k, v in os.environ.items() if not k.startswith(("FM_STATE_OVERRIDE", "FM_DATA_OVERRIDE", "FM_CONFIG_OVERRIDE", "FM_PROJECTS_OVERRIDE"))}
     env["FM_HOME"] = home
     try:
-        r = subprocess.run([binary, "--json"], capture_output=True, text=True, timeout=60, env=env)
+        r = subprocess.run([binary, "--json"], capture_output=True, text=True, timeout=limit, env=env)
         i = r.stdout.find("{")
         snap = json.loads(r.stdout[i:]) if i >= 0 else {}
-    except (OSError, ValueError, subprocess.SubprocessError):
-        snap = {}
+        if not isinstance(snap, dict) or "tasks" not in snap:
+            snap = {"_error": "fleet snapshot returned no task list (exit %d): %s" % (
+                r.returncode, (r.stderr.strip() or r.stdout.strip())[:160])}
+    except subprocess.TimeoutExpired:
+        snap = {"_error": "fleet snapshot timed out after %ds" % limit}
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        snap = {"_error": "fleet snapshot failed: %s" % str(exc)[:160]}
     _SNAP_CACHE[home] = (time.time(), snap)
     return snap
 
@@ -366,11 +408,13 @@ def open_decisions(home):
     for t in snap.get("tasks") or []:
         for d in (t.get("hints") or {}).get("open_decisions") or []:
             out.append({"key": d.get("key"), "task": t.get("id"), "kind": "worker",
-                        "verb": d.get("verb"), "text": d.get("summary") or ""})
+                        "verb": d.get("verb"), "text": d.get("summary") or "",
+                        "project": t.get("project") or ""})
     for r in (snap.get("backlog") or {}).get("records") or []:
         if r.get("captain_actionable"):
             out.append({"key": r.get("id"), "task": r.get("id"), "kind": "hold", "verb": "hold",
-                        "text": r.get("hold_reason") or r.get("title") or ""})
+                        "text": r.get("hold_reason") or r.get("title") or "",
+                        "project": r.get("repo") or ""})
     return [d for d in out if d["key"]]
 
 
@@ -383,6 +427,8 @@ def apply_decision(home, key, answer, mid):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("FM_STATE_OVERRIDE", "FM_DATA_OVERRIDE", "FM_CONFIG_OVERRIDE", "FM_PROJECTS_OVERRIDE"))}
     env["FM_HOME"] = home
     _SNAP_CACHE.pop(home, None)
+    if fleet_snapshot(home).get("_error"):
+        return False, fleet_snapshot(home)["_error"]
     match = next((d for d in open_decisions(home) if d["key"] == key), None)
     if match is None:
         return False, "no open decision or captain hold with key '%s'" % key
@@ -405,7 +451,7 @@ def open_context():
     """Open messages and open decision keys the triage model may refer to."""
     open_items = [{"id": it["id"], "summary": it["summary"],
                    "session": (it["triage"] or {}).get("session")}
-                  for it in derive() if it["state"] not in ("acked", "closed", "applied")][-15:]
+                  for it in derive() if it["state"] not in SETTLED][-15:]
     home, _ = session_home("primary")
     keys = [{"task": d["task"], "key": d["key"]} for d in open_decisions(home or FM_HOME)]
     return open_items, keys[:15]
@@ -509,30 +555,36 @@ def shutil_which(name):
     return None
 
 
-def record_decision(mid, tri):
-    """Append an answered decision to the session's decisions.md (idempotent per message id)."""
-    if tri.get("kind") != "decision-answer":
-        return
-    sid = tri.get("session") or "primary"
+def record_decision(mid, sid, key, answer, question, via):
+    """Append an ACCEPTED decision to the session's decisions.md (once per message id).
+
+    Called only after upstream accepted the answer. Appends under a lock with
+    O_APPEND, so concurrent writers cannot drop a line and a crash cannot
+    truncate the file."""
     d = os.path.join(DATA, "sessions", sid)
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, "decisions.md")
-    try:
-        with open(path) as f:
-            existing = f.read()
-    except OSError:
-        existing = "# Session %s decisions (appended by script when a decision is answered)\n" % sid
-    if "(%s)" % mid in existing:
-        return
-    body = " ".join(read_body(mid).split())
-    body = re.sub(r"^(?:@\S+\s+)?(?:answer\s+\S+|D-?\d+)\s*:\s*", "", body, flags=re.I)
-    key = tri.get("ref") or "?"
-    home, _ = session_home(sid)
-    q = next((d["text"][:160] for d in open_decisions(home or FM_HOME) if d["key"] == key), "")
-    line = "- %s %s: %s%s (%s)\n" % (now()[:10], key, body[:300], (" [asked: %s]" % q) if q else "", mid)
-    with open(path, "w") as f:
-        f.write(existing if existing.endswith("\n") else existing + "\n")
-        f.write(line)
+    with Locked(os.path.join(d, ".decisions.lock")):
+        try:
+            with open(path) as f:
+                existing = f.read()
+        except OSError:
+            existing = ""
+        if "(%s)" % mid in existing:
+            return
+        chunk = ""
+        if not existing:
+            chunk += "# Session %s decisions (appended by script after upstream accepted the answer)\n" % sid
+        elif not existing.endswith("\n"):
+            chunk += "\n"
+        chunk += "- %s %s: %s%s [via %s] (%s)\n" % (now()[:10], key, " ".join(answer.split())[:300],
+                                                  (" [asked: %s]" % question[:160]) if question else "", via, mid)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, chunk.encode())
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 def try_apply(it, tri):
@@ -551,9 +603,12 @@ def try_apply(it, tri):
         return False
     body = " ".join(read_body(it["id"]).split())
     body = re.sub(r"^(?:@\S+\s+)?(?:answer\s+\S+|D-?\d+)\s*:\s*", "", body, flags=re.I) or body
+    question = next((d["text"] for d in open_decisions(home) if d["key"] == tri["ref"]), "")
     ok, detail = apply_decision(home, tri["ref"], body, it["id"])
     if ok:
         append({"event": "applied", "id": it["id"], "ref": tri["ref"], "via": detail})
+        record_decision(it["id"], tri.get("session") or "primary", tri["ref"], body, question,
+                        "fm-send --resolve-key" if detail == "worker" else "fm-captain-hold answers")
         return True
     append({"event": "apply_failed", "id": it["id"], "ref": tri["ref"], "error": detail})
     return False
@@ -563,19 +618,20 @@ def cmd_triage(args):
     if not args or not valid_id(args[0]):
         die("usage: fm-intake.sh triage M-NNNN")
     mid = args[0]
-    items = {i["id"]: i for i in derive()}
-    it = items.get(mid)
-    if it is None:
-        die("no message %s" % mid)
-    if it["state"] == "captured":
-        tri, _ = classify(mid)
-        append(dict(tri, event="triaged", id=mid))
-        record_decision(mid, tri)
-        it = {i["id"]: i for i in derive()}[mid]
-        if try_apply(it, tri):
-            return 0
-    if it["state"] in ("triaged", "delivery_failed"):
-        deliver(it)
+    # One triage per message at a time: the background triage, `retry` and the
+    # dashboard can race, and a decision must never be applied twice.
+    with Locked(os.path.join(INTAKE, "triage-locks", mid + ".lock")):
+        it = {i["id"]: i for i in derive()}.get(mid)
+        if it is None:
+            die("no message %s" % mid)
+        if it["state"] == "captured":
+            tri, _ = classify(mid)
+            append(dict(tri, event="triaged", id=mid))
+            it = {i["id"]: i for i in derive()}[mid]
+            if try_apply(it, tri):
+                return 0
+        if it["state"] in ("triaged", "delivery_failed"):
+            deliver(it)
     return 0
 
 
@@ -637,9 +693,9 @@ def cmd_route(args):
     if it is None:
         die("no message %s" % mid)
     tri = dict(it["triage"] or {"kind": "new"}, session=sid, by="captain")
-    append(dict(tri, event="triaged", id=mid))
-    record_decision(mid, tri)
-    deliver({i["id"]: i for i in derive()}[mid])
+    with Locked(os.path.join(INTAKE, "triage-locks", mid + ".lock")):
+        append(dict(tri, event="triaged", id=mid))
+        deliver({i["id"]: i for i in derive()}[mid])
     return 0
 
 
@@ -665,7 +721,7 @@ def cmd_list(args):
     as_json = "--json" in args
     items = derive()
     if not show_all:
-        items = [i for i in items if i["state"] not in ("acked", "closed", "applied")]
+        items = [i for i in items if i["state"] not in SETTLED]
     if as_json:
         print(json.dumps([{k: i.get(k) for k in ("id", "state", "captured_at", "summary", "triage", "delivery")}
                           for i in items], indent=1))

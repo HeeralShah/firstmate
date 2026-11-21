@@ -18,6 +18,11 @@
 #
 # Fails open: if anything goes wrong the prompt passes through and the captain
 # is told, because swallowing a prompt silently is worse than a normal turn.
+#
+# Registered once in the tracked .claude/settings.json (sessions in this repo).
+# Registering it in ~/.claude/settings.json as well, for other repos, is safe:
+# both hooks see the same session id and prompt, and fm-intake dedupes that key
+# within two minutes, so one prompt is one message.
 set -uo pipefail
 
 [ "${FM_INTAKE_TRIAGE:-}" = 1 ] && exit 0
@@ -35,21 +40,27 @@ if [ -z "$prefix" ] && [ -r "$FM_HOME/config/intake-prefix" ]; then
 fi
 prefix="${prefix:-">>"}"
 
-# Extract the prompt; print the body after the prefix, or nothing if no match.
-body=$(printf '%s' "$payload" | PREFIX="$prefix" python3 -c '
-import json, os, sys
+# Extract the prompt. Line 1 is the dedupe key (session id + prompt), the rest
+# is the body after the prefix; nothing at all when the prefix does not match.
+parsed=$(printf '%s' "$payload" | PREFIX="$prefix" python3 -c '
+import hashlib, json, os, sys
 try:
-    p = json.load(sys.stdin).get("prompt", "")
+    d = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
+p = d.get("prompt", "") or ""
 pre = os.environ["PREFIX"]
 s = p.lstrip()
-if s.startswith(pre):
-    sys.stdout.write(s[len(pre):].lstrip())
+if s.startswith(pre) and s[len(pre):].strip():
+    key = hashlib.sha256(((d.get("session_id") or "") + "\0" + p).encode()).hexdigest()[:24]
+    sys.stdout.write(key + "\n" + s[len(pre):].lstrip())
 ') || exit 0
+[ -n "$parsed" ] || exit 0
+key=${parsed%%$'\n'*}
+body=${parsed#*$'\n'}
 [ -n "$body" ] || exit 0
 
-if out=$(printf '%s' "$body" | "$SELF_DIR/fm-intake.sh" add --source hook - 2>&1); then
+if out=$(printf '%s' "$body" | "$SELF_DIR/fm-intake.sh" add --source hook --dedupe-key "$key" - 2>&1); then
   reason="$out"
   decision=block
 else

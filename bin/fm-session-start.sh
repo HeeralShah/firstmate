@@ -1071,7 +1071,10 @@ if [ -r "$CONFIG/active-session" ]; then
     ''|*[!A-Za-z0-9._-]*) ;;
     *)
       subsection "session context: $SESSION_ACTIVE (rebuilt from disk)"
-      FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-dashboard.sh" card "$SESSION_ACTIVE" --rehydrate 2>&1 || printf '(session card unavailable)\n'
+      # Bounded: the digest has a runtime budget, so a slow fleet snapshot is cut
+      # off and the card says the snapshot is unavailable rather than delaying it.
+      FM_HOME="$FM_HOME" FM_SNAPSHOT_TIMEOUT="${FM_SESSION_CARD_SNAPSHOT_TIMEOUT:-20}" \
+        "$SCRIPT_DIR/fm-dashboard.sh" card "$SESSION_ACTIVE" --rehydrate 2>&1 || printf '(session card unavailable)\n'
       ;;
   esac
 fi

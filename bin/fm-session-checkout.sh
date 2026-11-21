@@ -48,8 +48,22 @@ scope_repos() {  # prints the session's repos, one per line
   fi
 }
 
+# The source repo's default branch: its origin/HEAD, else main or master.
+default_branch() {  # <repo>
+  local b
+  b=$(git -C "$1" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  b=${b#origin/}
+  if [ -z "$b" ]; then
+    for b in main master; do
+      git -C "$1" rev-parse --verify -q "refs/heads/$b" >/dev/null && break
+      b=
+    done
+  fi
+  printf '%s\n' "$b"
+}
+
 cmd_create() {
-  local sid=${1:-} src r dest url view made=0
+  local sid=${1:-} src r dest url view base made=0
   [ -n "$sid" ] || die "usage: fm-session-checkout.sh create <session> [<repo>...]"
   shift
   sessions_get "$sid" || die "no session '$sid'"
@@ -70,9 +84,24 @@ cmd_create() {
     else
       mkdir -p "$PROJECTS/$r"
       git clone --local -q "$src/$r" "$dest"
+      # Start on the repo's DEFAULT branch, not whatever the source has checked
+      # out (a feature branch in ~/Projects must not become the session's base).
+      base=$(default_branch "$src/$r")
+      if [ -n "$base" ] && [ "$(git -C "$dest" rev-parse --abbrev-ref HEAD)" != "$base" ]; then
+        git -C "$dest" checkout -q "$base" 2>/dev/null || git -C "$dest" checkout -q -b "$base" "origin/$base"
+      fi
       url=$(git -C "$src/$r" remote get-url origin 2>/dev/null || true)
-      if [ -n "$url" ]; then git -C "$dest" remote set-url origin "$url"; else git -C "$dest" remote remove origin 2>/dev/null || true; fi
-      printf 'created %s\n' "$dest"
+      if [ -n "$url" ]; then
+        git -C "$dest" remote set-url origin "$url"
+        # origin/* refs were copied from the LOCAL source; refresh them from the
+        # real remote so ahead/behind counts are true. Offline is reported, not fatal.
+        if ! git -C "$dest" fetch -q --prune origin 2>/dev/null; then
+          printf 'warning: could not fetch %s; origin/* in %s reflect the local source until fetched\n' "$url" "$dest" >&2
+        fi
+      else
+        git -C "$dest" remote remove origin 2>/dev/null || true
+      fi
+      printf 'created %s (on %s)\n' "$dest" "$(git -C "$dest" rev-parse --abbrev-ref HEAD)"
       made=$((made + 1))
     fi
     [ -L "$view/$r" ] || ln -s "../../../../projects/$r/$sid" "$view/$r"

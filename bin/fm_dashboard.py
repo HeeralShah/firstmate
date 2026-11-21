@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """fm_dashboard.py - per-session dashboard, state card, and the local decision server.
 
-Everything shown is DERIVED from durable files on each request, never held in
-memory: the intake log, data/sessions/<id>/{plan,summary}.md, the session home's
-state/*.status lines, and read-only git queries on the session's repos. A refresh
-can therefore never disagree with disk, and a restart loses nothing.
+Everything shown is DERIVED on each request, never held in memory: the intake
+log, data/sessions/<id>/*.md, upstream's fm-fleet-snapshot.sh (current worker
+state, open decisions, task branches and work copies), and read-only git
+queries. A refresh cannot disagree with those sources, and a restart loses
+nothing. When the snapshot fails or times out the card and page SAY so rather
+than showing an empty, all-clear fleet.
 
-  card <id> [--rehydrate]   compact markdown state card (no model). --rehydrate
-                            prefixes the session instructions and a rule to trust
-                            the card over conversation memory; this is what a
-                            Claude Code SessionStart hook (matcher: compact)
-                            prints so a compacted chat resumes from facts.
+  card <id> [--rehydrate]   compact markdown state card (no model), kept under a
+                            word budget by dropping whole lowest-priority items
+                            and naming what was omitted. --rehydrate prefixes the
+                            session instructions; bin/fm-session-start.sh prints
+                            it in its CONTEXT section, which the existing --reemit
+                            path also prints after /clear and compaction.
   render <id> [--out FILE]  one static HTML page (read-only snapshot).
   serve [--port N]          127.0.0.1 server: overview, per-session pages, and the
                             decision/note endpoints that write to the intake log.
@@ -30,19 +33,9 @@ from urllib.parse import urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fm_intake as fi  # noqa: E402  (shares log, sessions, routing)
 
-PROJECTS = os.path.join(fi.FM_HOME, "projects")
 import fm_session_memory as fm_mem  # noqa: E402
 
 
-def source_root():
-    v = os.environ.get("FM_PROJECTS_SOURCE") or fi.read_setting("projects-source")
-    return v if v and os.path.isdir(v) else ""
-
-
-def repo_path(name, sid):
-    """The session's own clone when it exists, else the source repo (read-only)."""
-    own = os.path.join(PROJECTS, name, sid)
-    return own if os.path.exists(os.path.join(own, ".git")) else os.path.join(source_root(), name)
 STEP_MARK = {"x": "accepted", "~": "review", "!": "blocked", " ": "todo"}
 CARD_WORDS = 700
 
@@ -78,11 +71,6 @@ def session_info(sid):
     return None
 
 
-def home_state(sid):
-    home, _ = fi.session_home(sid)
-    return os.path.join(home or fi.FM_HOME, "state")
-
-
 def session_repo_set(sid):
     info = session_info(sid)
     if not info or info["repos"] == "*":
@@ -90,21 +78,36 @@ def session_repo_set(sid):
     return {r.strip() for r in info["repos"].split(",") if r.strip()}
 
 
-def workers(sid):
-    """Current worker state from the fleet snapshot (not a status-log tail), newest first."""
+def snap_for(sid):
     home, _ = fi.session_home(sid)
+    return fi.fleet_snapshot(home or fi.FM_HOME)
+
+
+def project_name(value):
+    """Snapshot `project` is a directory path; the session registry uses names."""
+    return os.path.basename(str(value).rstrip("/")) if value else ""
+
+
+def in_session(sid, project):
     repos = session_repo_set(sid)
+    return repos is None or not project or project_name(project) in repos
+
+
+def session_tasks(sid):
+    return [t for t in snap_for(sid).get("tasks") or [] if in_session(sid, t.get("project"))]
+
+
+def workers(sid):
+    """Current worker state from the fleet snapshot (not a status-log tail), most recent event first."""
     out = []
-    for t in fi.fleet_snapshot(home or fi.FM_HOME).get("tasks") or []:
-        if repos is not None and t.get("project") and t["project"] not in repos:
-            continue
+    for t in session_tasks(sid):
         cs = t.get("current_state") or {}
         hints = t.get("hints") or {}
+        last = (((t.get("paths") or {}).get("status_log") or {}).get("last_event") or {})
         out.append({"task": t.get("id"), "kind": t.get("kind"), "state": cs.get("state") or "unknown",
                     "text": (cs.get("detail") or hints.get("last_event_text") or "")[:300],
-                    "age": (((t.get("paths") or {}).get("status_log") or {}).get("age_seconds")) or 0,
-                    "project": t.get("project") or ""})
-    return sorted(out, key=lambda w: w["age"])
+                    "age": last.get("age_seconds"), "project": project_name(t.get("project"))})
+    return sorted(out, key=lambda w: (w["age"] is None, w["age"] or 0))
 
 
 def decisions(sid):
@@ -116,7 +119,8 @@ def decisions(sid):
         tri = i["triage"] or {}
         if tri.get("kind") == "decision-answer" and i["state"] not in ("applied", "closed", "acked"):
             pending.add(tri.get("ref"))
-    return [dict(d, pending=d["key"] in pending) for d in fi.open_decisions(home or fi.FM_HOME)]
+    return [dict(d, pending=d["key"] in pending) for d in fi.open_decisions(home or fi.FM_HOME)
+            if in_session(sid, d.get("project"))]
 
 
 def session_items(sid):
@@ -129,19 +133,6 @@ def session_items(sid):
     return out
 
 
-def repos_for(sid):
-    s = session_info(sid)
-    if s and s["repos"] != "*":
-        names = [r.strip() for r in s["repos"].split(",") if r.strip()]
-    else:
-        try:
-            src = source_root()
-            names = sorted(n for n in os.listdir(src) if os.path.exists(os.path.join(src, n, ".git"))) if src else []
-        except OSError:
-            names = []
-    return names
-
-
 def git(repo, *args):
     try:
         r = subprocess.run(["git", "-C", repo] + list(args), capture_output=True, text=True, timeout=20)
@@ -151,30 +142,35 @@ def git(repo, *args):
 
 
 def code_changes(sid):
-    """Read-only: fm/* task branches per repo, commits ahead of the default branch, files by dir."""
+    """Read-only: each task branch the snapshot knows, diffed in its own work copy.
+
+    Taken from upstream's task records (branch, work copy, project), so every
+    branch prefix and every clone layout is covered, not only fm/* in one place."""
     out = []
-    for name in repos_for(sid):
-        repo = repo_path(name, sid)
-        if not os.path.exists(os.path.join(repo, ".git")):
+    for t in session_tasks(sid):
+        branch = t.get("branch")
+        wt = ((t.get("paths") or {}).get("worktree") or {})
+        repo = wt.get("path") if wt.get("present") else (t.get("project") or "")
+        if not branch or not repo or not os.path.exists(os.path.join(repo, ".git")):
             continue
-        base = (git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip().split("/", 1) + [""])[-1] \
-            or next((b for b in ("main", "master") if git(repo, "rev-parse", "--verify", "-q", b).strip()), "")
+        base = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip() \
+            or next((b for b in ("origin/main", "main", "origin/master", "master")
+                     if git(repo, "rev-parse", "--verify", "-q", b).strip()), "")
         if not base:
             continue
-        branches = [b.strip() for b in git(repo, "branch", "--list", "fm/*", "--format=%(refname:short)").splitlines() if b.strip()]
-        for b in branches:
-            ahead = git(repo, "rev-list", "--count", "%s..%s" % (base, b)).strip() or "0"
-            dirs = {}
-            for line in git(repo, "diff", "--numstat", "%s...%s" % (base, b)).splitlines():
-                parts = line.split("\t")
-                if len(parts) == 3:
-                    top = parts[2].split("/", 1)[0] if "/" in parts[2] else "(root)"
-                    d = dirs.setdefault(top, {"files": 0, "add": 0, "del": 0})
-                    d["files"] += 1
-                    d["add"] += int(parts[0]) if parts[0].isdigit() else 0
-                    d["del"] += int(parts[1]) if parts[1].isdigit() else 0
-            head = git(repo, "log", "-1", "--format=%h %s", b).strip()
-            out.append({"repo": name, "branch": b, "base": base, "ahead": ahead, "head": head, "dirs": dirs})
+        ahead = git(repo, "rev-list", "--count", "%s..%s" % (base, branch)).strip() or "?"
+        dirs = {}
+        for line in git(repo, "diff", "--numstat", "%s...%s" % (base, branch)).splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3:
+                top = parts[2].split("/", 1)[0] if "/" in parts[2] else "(root)"
+                d = dirs.setdefault(top, {"files": 0, "add": 0, "del": 0})
+                d["files"] += 1
+                d["add"] += int(parts[0]) if parts[0].isdigit() else 0
+                d["del"] += int(parts[1]) if parts[1].isdigit() else 0
+        head = git(repo, "log", "-1", "--format=%h %s", branch).strip()
+        out.append({"repo": project_name(t.get("project")) or t.get("id"), "branch": branch, "base": base,
+                    "ahead": ahead, "head": head, "dirs": dirs, "task": t.get("id")})
     return out
 
 
@@ -191,7 +187,7 @@ def guide_rules(sid):
 def facts(sid):
     steps = plan(sid)
     counts = {k: sum(1 for s in steps if s["state"] == k) for k in ("accepted", "review", "blocked", "todo")}
-    open_items = [i for i in session_items(sid) if i["state"] not in ("acked", "closed")]
+    open_items = [i for i in session_items(sid) if i["state"] not in fi.SETTLED]
     ds = decisions(sid)
     attention = len(ds) + counts["blocked"] + sum(1 for w in workers(sid) if w["state"] in ("blocked", "failed"))
     return {"id": sid, "info": session_info(sid), "steps": steps, "counts": counts, "decisions": ds,
@@ -201,59 +197,91 @@ def facts(sid):
             "review": fm_mem.review_status(sid) if os.path.isdir(sdir(sid)) else (False, ""),
             "decided": tail_entries(sid, "decisions.md", 10), "guide": guide_rules(sid),
             "summary": read_text(os.path.join(sdir(sid), "summary.md")).strip(),
-            "changes": code_changes(sid)}
+            "changes": code_changes(sid), "snapshot_error": snap_for(sid).get("_error"),
+            "memory_total": len(fm_mem.entries(sid)) if os.path.isdir(sdir(sid)) else 0}
 
 
 # ----------------------------------------------------------------------- card
 
 def card(sid, rehydrate=False):
+    """State card as sections in priority order, kept under CARD_WORDS by dropping
+    whole items from the LOWEST-priority sections first and naming what was
+    omitted. Line structure is never collapsed. Priority, kept longest first:
+    snapshot failure (never dropped), open and recorded decisions, the guide,
+    session memory and open messages, progress and workers, branches, summary."""
     f = facts(sid)
     info = f["info"] or {"kind": "primary", "repos": "*", "summary": "primary home"}
-    L = ["# Session %s state card" % sid,
-         "Built %s from disk (log, plan, status lines, git). Facts below are authoritative." % fi.now(),
-         "Scope: %s; repos: %s." % (info.get("summary"), info.get("repos"))]
     c = f["counts"]
-    if f["steps"]:
-        L.append("\n## Progress: %d accepted, %d in review, %d blocked, %d todo" % (c["accepted"], c["review"], c["blocked"], c["todo"]))
-        for s in f["steps"]:
-            if s["state"] != "accepted":
-                L.append("- [%s] %s" % (s["state"], s["text"]))
+    head = ["# Session %s state card" % sid,
+            "Built %s from the intake log, session files, the fleet snapshot and git. Facts below are authoritative." % fi.now(),
+            "Scope: %s; repos: %s." % (info.get("summary"), info.get("repos"))]
+    sections = []  # (priority: lower keeps longer, title, items)
+    if f["snapshot_error"]:
+        sections.append((0, "FLEET SNAPSHOT UNAVAILABLE: open decisions and workers are UNKNOWN, not zero",
+                         ["- %s" % f["snapshot_error"]]))
     if f["decisions"]:
-        L.append("\n## Open decisions (answer via the dashboard or `D<n>: ...` intake)")
-        for d in f["decisions"]:
-            L.append("- %s (task %s)%s: %s" % (d["key"], d["task"], " [answer logged, not yet applied]" if d.get("pending") else "", d["text"][:200]))
-    if f["open_items"]:
-        L.append("\n## Open intake messages")
-        for i in f["open_items"][-10:]:
-            L.append("- %s [%s] %s" % (i["id"], i["state"], i["summary"][:100]))
-    if f["workers"]:
-        L.append("\n## Workers (latest status)")
-        for w in f["workers"][:8]:
-            L.append("- %s: %s %s" % (w["task"], w["state"], w["text"][:120]))
-    if f["changes"]:
-        L.append("\n## Branches")
-        for ch in f["changes"][:8]:
-            L.append("- %s %s: %s ahead of %s; head %s" % (ch["repo"], ch["branch"], ch["ahead"], ch["base"], ch["head"]))
+        sections.append((1, "Open decisions (answer via the dashboard or `D<n>: ...` intake)",
+                         ["- %s (task %s)%s: %s" % (d["key"], d["task"], " [answer logged, not yet applied]" if d.get("pending") else "", d["text"][:200])
+                          for d in f["decisions"]]))
+    if f["decided"]:
+        sections.append((1, "Decisions already made (do not re-ask; change only if the captain reopens one)",
+                         ["- %s" % x for x in f["decided"]]))
     gset, grules = f["guide"]
     if gset or grules:
-        L.append("\n## Session guide (meta-rules: how this captain wants the session run; follow them)")
-        L += ["- %s" % x for x in gset + grules[-15:]]
-    if f["decided"]:
-        L.append("\n## Decisions already made (do not re-ask; change only if the captain reopens one)")
-        L += ["- %s" % x for x in f["decided"]]
+        sections.append((2, "Session guide (meta-rules: how this captain wants the session run; follow them)",
+                         ["- %s" % x for x in gset + grules[-15:]]))
+    if f["steps"]:
+        sections.append((4, "Progress: %d accepted, %d in review, %d blocked, %d todo" % (c["accepted"], c["review"], c["blocked"], c["todo"]),
+                         ["- [%s] %s" % (s_["state"], s_["text"]) for s_ in f["steps"] if s_["state"] != "accepted"]))
+    if f["open_items"]:
+        sections.append((3, "Open intake messages", ["- %s [%s] %s" % (i["id"], i["state"], i["summary"][:100]) for i in f["open_items"][-10:]]))
+    if f["workers"]:
+        sections.append((4, "Workers (current state)", ["- %s: %s %s" % (w["task"], w["state"], w["text"][:120]) for w in f["workers"][:8]]))
     if f["memory"]:
-        L.append("\n## Session memory (durable content; pinned first, then newest)")
         pinned = [x for x in f["memory"] if x[0] == "pinned"]
         rest = [x for x in f["memory"] if x[0] != "pinned"][-12:]
-        L += ["- %s%s" % (tx, " [pinned]" if t == "pinned" else "") for t, tx in pinned + rest]
+        shown = pinned + rest
+        items = ["- %s%s" % (tx, " [pinned]" if t == "pinned" else "") for t, tx in shown]
+        if f["memory_total"] > len(shown):
+            items.append("- [%d older entries not shown: `fm-session-memory.sh list %s`]" % (f["memory_total"] - len(shown), sid))
+        sections.append((3, "Session memory (durable content; pinned first, then newest)", items))
+    if f["changes"]:
+        sections.append((6, "Branches", ["- %s %s: %s ahead of %s; head %s" % (ch["repo"], ch["branch"], ch["ahead"], ch["base"], ch["head"]) for ch in f["changes"][:8]]))
+    tail = []
     if f["review"][0]:
-        L.append("\nMEMORY REVIEW DUE: %s. Run `fm-session-memory.sh review %s` and curate." % (f["review"][1], sid))
+        tail.append("MEMORY REVIEW DUE: %s. Run /stow, then `fm-session-memory.sh reviewed %s`." % (f["review"][1], sid))
     if f["summary"]:
-        L.append("\n## Captain/agent summary (a claim, written at a checkpoint; facts above win)\n" + f["summary"][:1500])
+        sections.append((7, "Captain/agent summary (a claim, written at a checkpoint; facts above win)", [f["summary"][:1500]]))
+
+    def words(secs):
+        return sum(len(x.split()) for _, t, items in secs for x in [t] + items) + sum(len(x.split()) for x in head + tail)
+
+    omitted = {}
+    while words(sections) > CARD_WORDS:
+        # Trim the lowest-priority section that still has items; never priority 0.
+        cands = [i for i, (p, _, items) in enumerate(sections) if p > 0 and items]
+        if not cands:
+            break
+        i = max(cands, key=lambda k: (sections[k][0], k))
+        p, t, items = sections[i]
+        # A disclosure line ("... not shown") is kept while its section is.
+        k = next((j for j in range(len(items) - 1, -1, -1) if "not shown:" not in items[j]), None)
+        if k is None:
+            sections.pop(i)
+            continue
+        items.pop(k)
+        omitted[t] = omitted.get(t, 0) + 1
+        if all("not shown:" in x for x in items):
+            sections.pop(i)
+    L = list(head)
+    for _, t, items in sorted(sections, key=lambda x: x[0]):
+        L.append("\n## " + t)
+        L += items
+    if omitted:
+        L.append("\n[card trimmed to %d words; omitted: %s. Full card: `fm-dashboard.sh card %s`]" % (
+            CARD_WORDS, ", ".join("%d from %s" % (n, t.split(" (")[0]) for t, n in omitted.items()), sid))
+    L += tail
     text = "\n".join(L)
-    words = text.split()
-    if len(words) > CARD_WORDS:
-        text = " ".join(words[:CARD_WORDS]) + "\n[card truncated: run `fm-dashboard.sh card %s` for the full card]" % sid
     if not rehydrate:
         return text + "\n"
     ins = read_text(os.path.join(sdir(sid), "instructions.md"), 8000)
@@ -327,6 +355,8 @@ def page_live(f):
              ("ok", c["accepted"], "steps accepted"), ("warn", len(f["open_items"]), "open messages")]
     parts.append('<div class="tiles">%s</div>' % "".join(
         '<div class="tile t-%s"><b>%d</b>%s</div>' % (k, n, e(lbl)) for k, n, lbl in tiles))
+    if f["snapshot_error"]:
+        parts.insert(0, "<div class='box dec'><b>Fleet snapshot unavailable.</b> Open decisions and workers below are unknown, not zero. %s</div>" % e(f["snapshot_error"]))
     parts.append("<h2>Progress</h2>")
     if f["steps"]:
         parts.append('<div class="mut">%d accepted, %d in review, %d blocked, %d to do, of %d steps</div>' % (
@@ -350,7 +380,7 @@ def page_live(f):
                      '<button class="alt" data-ans="Approved as proposed" onclick="decide(%s,this)">Approve as proposed</button>'
                      '<button class="alt" data-ans="Rejected; stop this work" onclick="decide(%s,this)">Reject</button></div>' % (
                          e(d["key"]), e(d["task"]), e(d["text"]), e(json.dumps(d["key"])), e(json.dumps(d["key"])), e(json.dumps(d["key"]))))
-    if not f["decisions"]:
+    if not f["decisions"] and not f["snapshot_error"]:
         parts.append('<div class="mut">Nothing is waiting on you.</div>')
     if f["decided"]:
         parts.append("<h2>Decided</h2><div class='box'>%s</div>" % "".join("<div>%s</div>" % e(x) for x in f["decided"][::-1]))
@@ -366,7 +396,7 @@ def page_live(f):
     parts.append("<h2>Workers</h2>")
     if f["workers"]:
         parts.append("<table><tr><th>Task</th><th>State</th><th>Latest</th><th>Age</th></tr>%s</table>" % "".join(
-            "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (e(w["task"]), pill(w["state"]), e(w["text"][:160]), age(w["age"]) if w["age"] else "")
+            "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (e(w["task"]), pill(w["state"]), e(w["text"][:160]), age(w["age"]) if w["age"] is not None else "unknown")
             for w in f["workers"]))
     else:
         parts.append('<div class="mut">No workers recorded for this session.</div>')
@@ -378,7 +408,7 @@ def page_live(f):
             parts.append("<details class='box'><summary><b>%s</b> <code>%s</code> %s commits ahead of %s <span class='mut'>%s</span></summary><table>%s</table></details>" % (
                 e(ch["repo"]), e(ch["branch"]), e(ch["ahead"]), e(ch["base"]), e(ch["head"]), rows or "<tr><td class='mut'>no file changes</td></tr>"))
     else:
-        parts.append('<div class="mut">No <code>fm/*</code> task branches in this session\'s repos.</div>')
+        parts.append('<div class="mut">No task branches recorded for this session\'s repos.</div>')
     parts.append("<h2>Messages</h2>")
     items = f["items"][-15:][::-1]
     parts.append("<table>%s</table>" % "".join(
@@ -425,7 +455,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _host_ok(self):
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
+        return host in ("127.0.0.1", "localhost", "::1")
+
     def do_GET(self):
+        if not self._host_ok():
+            return self._send(403, "forbidden")
         path = urlparse(self.path).path
         try:
             if path == "/":
@@ -445,6 +481,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj), "application/json")
 
     def do_POST(self):
+        if not self._host_ok():
+            return self._json(403, {"error": "forbidden"})
         host = (self.headers.get("Origin") or "").split("//")[-1].split(":")[0]
         if self.headers.get("X-FM-Dashboard") != "1" or (host and host not in ("127.0.0.1", "localhost")):
             return self._json(403, {"error": "forbidden"})

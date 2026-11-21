@@ -9,17 +9,21 @@
 #                                          changes, and a Decisions section whose
 #                                          buttons write to the intake log
 #   fm-dashboard.sh card <session> [--rehydrate]
-#                                          compact markdown state card rebuilt from
-#                                          disk with no model; --rehydrate is the
-#                                          form for a SessionStart(compact) hook
+#                                          compact markdown state card rebuilt with
+#                                          no model; --rehydrate is the form
+#                                          bin/fm-session-start.sh prints, including
+#                                          on its --reemit after compaction
 #   fm-dashboard.sh render <session> [--out FILE]
 #                                          one static read-only HTML snapshot
 #
-# `primary` names the main home as a session. Every page is derived from durable
-# files on each request, so it cannot disagree with disk and a restart loses
-# nothing. Decisions and notes POST to the local server only (loopback bind, a
-# required header, and an origin check) and land through bin/fm-intake.sh, so a
-# decision is a logged event, not chat. Contract: docs/session-context.md.
+# `primary` names the main home as a session. Every page is derived on each
+# request from the intake log, session files, upstream's fleet snapshot and git,
+# so a restart loses nothing; a failed snapshot is shown as unavailable, never as
+# an empty fleet. Decisions and notes POST to the local server only (loopback
+# bind and Host check, a required header, an origin check), are logged through
+# bin/fm-intake.sh, and decisions are applied through fm-send --resolve-key or
+# fm-captain-hold.sh answers. FM_SNAPSHOT_TIMEOUT bounds the snapshot (default
+# 60 s). Contract: docs/session-context.md.
 set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 command -v python3 >/dev/null 2>&1 || { echo "fm-dashboard: python3 is required" >&2; exit 1; }

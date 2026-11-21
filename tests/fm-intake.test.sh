@@ -204,6 +204,68 @@ test_session_memory_tiers_decay_and_cadence() {
   pass "session memory dedupes, archives stale entries without deleting, honours pins, and makes a review due on activity or size"
 }
 
+test_unknown_decision_key_is_never_recorded() {
+  local before after out
+  before=$(grep -c '^- ' "$HOME_DIR/data/sessions/quant/decisions.md" || true)
+  "$INTAKE" add --session quant "D99: go with option C" >/dev/null
+  out=$("$INTAKE" add --session quant "D99: go with option C" | sed 's/Queued //')
+  "$INTAKE" triage "$out"
+  after=$(grep -c '^- ' "$HOME_DIR/data/sessions/quant/decisions.md" || true)
+  [ "$before" = "$after" ] || fail "an answer to a key nothing owns was recorded as decided"
+  case "$("$INTAKE" show "$out")" in *apply_failed*delivered*) ;; *) fail "unknown key was not routed to the first mate: $("$INTAKE" show "$out")" ;; esac
+  pass "an answer to an unknown decision key is delivered as a note and never recorded as decided"
+}
+
+test_handled_messages_read_as_settled_everywhere() {
+  local id note
+  id=$("$INTAKE" add "@chores tidy the readme" | sed 's/Queued //')
+  "$INTAKE" triage "$id"
+  mkdir -p "$HOME_DIR/state/inbox/handled"
+  for note in "$HOME_DIR/state/inbox"/*.note; do [ -e "$note" ] && mv "$note" "$HOME_DIR/state/inbox/handled/"; done
+  FM_SNAPSHOT_BIN="$TMP_ROOT/snap.sh" "$ROOT/bin/fm-dashboard.sh" card chores | grep -q "$id" && fail "card still lists a handled message as open"
+  case "$("$INTAKE" list)" in *"$id"*) fail "list still shows a handled message" ;; esac
+  pass "a message the target home handled reads as settled in the card and list without a manual sync"
+}
+
+test_hook_dedupes_double_registration() {
+  local a b
+  a=$(printf '{"session_id":"s1","prompt":">> same thing twice"}' | "$HOOK")
+  b=$(printf '{"session_id":"s1","prompt":">> same thing twice"}' | "$HOOK")
+  [ "$a" = "$b" ] || fail "two hooks for one prompt made two messages: $a / $b"
+  a=$(printf '{"session_id":"s2","prompt":">> same thing twice"}' | "$HOOK")
+  [ "$a" != "$b" ] || fail "a different session was wrongly deduped"
+  pass "the same prompt seen by two registered hooks is one message, and another session's is not"
+}
+
+test_concurrent_triage_applies_once() {
+  local id
+  rm -f "$TMP_ROOT/send.log"
+  export FM_SNAPSHOT_BIN="$TMP_ROOT/snap.sh" FM_SEND_BIN="$TMP_ROOT/send.sh"
+  id=$("$INTAKE" add "@quant D3: log returns after all" | sed 's/Queued //')
+  "$INTAKE" triage "$id" & "$INTAKE" triage "$id" & "$INTAKE" triage "$id" &
+  wait
+  unset FM_SNAPSHOT_BIN FM_SEND_BIN
+  [ "$(grep -c 'resolve-key D3' "$TMP_ROOT/send.log")" = 1 ] || fail "decision applied $(grep -c 'resolve-key D3' "$TMP_ROOT/send.log") times"
+  pass "three concurrent triages of one decision apply it exactly once"
+}
+
+test_session_clone_starts_on_default_branch() {
+  "$SESSIONS" add feat --summary "Feature work" --kind theme --repos repob >/dev/null
+  git -C "$REPOS/repob" checkout -q -b feature/wip
+  "$ROOT/bin/fm-session-checkout.sh" create feat >/dev/null 2>&1
+  git -C "$REPOS/repob" checkout -q -
+  [ "$(git -C "$HOME_DIR/projects/repob/feat" rev-parse --abbrev-ref HEAD)" != feature/wip ] || fail "clone started on the source's feature branch"
+  pass "a session clone starts on the repo's default branch, not whatever the source has checked out"
+}
+
+test_same_day_messages_do_not_age_new_facts() {
+  local mem="$ROOT/bin/fm-session-memory.sh" i
+  for i in $(seq 1 35); do "$INTAKE" add --session quant "busy $i" >/dev/null; done
+  "$mem" add quant --perishable "FRESH_PERISHABLE_FACT" >/dev/null
+  case "$("$mem" review quant)" in *FRESH_PERISHABLE_FACT*) fail "a fact recorded today is stale from earlier messages today" ;; esac
+  pass "messages captured earlier the same day do not make a newly recorded fact stale"
+}
+
 test_hook_blocks_prefixed_only() {
   local out
   out=$(printf '{"prompt":">> remember pineapple"}' | "$HOOK")
@@ -237,5 +299,11 @@ fm_test_run \
   test_unroutable_session_fails_visibly \
   test_answered_decision_is_logged_to_decisions_file \
   test_session_memory_tiers_decay_and_cadence \
+  test_unknown_decision_key_is_never_recorded \
+  test_handled_messages_read_as_settled_everywhere \
+  test_hook_dedupes_double_registration \
+  test_concurrent_triage_applies_once \
+  test_session_clone_starts_on_default_branch \
+  test_same_day_messages_do_not_age_new_facts \
   test_hook_blocks_prefixed_only \
   test_log_is_valid_json_lines

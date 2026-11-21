@@ -33,7 +33,8 @@ d4='{"key":"D4","verb":"needs-decision","summary":"Use log or simple returns?"}'
 [ -e "$FAKE/closed-D4" ] && d4=''
 hold='{"id":"hold-1","captain_actionable":true,"title":"Pick data vendor","hold_reason":"vendor choice"}'
 [ -e "$FAKE/closed-hold-1" ] && hold=''
-printf '{"tasks":[{"id":"sharpe","kind":"ship","project":"repoa","current_state":{"state":"needs-decision","detail":"waiting on a call"},"hints":{"open_decisions":[%s],"last_event_text":""},"paths":{"status_log":{"age_seconds":120}}}],"backlog":{"records":[%s]}}\n' "\$d4" "\$hold"
+[ -e "$FAKE/snapshot-broken" ] && { echo "boom" >&2; exit 3; }
+printf '{"tasks":[{"id":"sharpe","kind":"ship","project":"$REPOS/repoa","branch":"fm/sharpe","current_state":{"state":"needs-decision","detail":"waiting on a call"},"hints":{"open_decisions":[%s],"last_event_text":""},"paths":{"worktree":{"path":null,"present":false},"status_log":{"last_event":{"age_seconds":120}}}},{"id":"other","kind":"ship","project":"$REPOS/elsewhere","branch":null,"current_state":{"state":"needs-decision"},"hints":{"open_decisions":[{"key":"X1","verb":"needs-decision","summary":"Not this session"}]},"paths":{}}],"backlog":{"records":[%s]}}\n' "\$d4" "\$hold"
 SNAP
 cat >"$FAKE/send.sh" <<SEND
 #!/usr/bin/env bash
@@ -59,10 +60,11 @@ test_card_is_rebuilt_from_disk_and_snapshot() {
   local card
   card=$("$DASH" card quant)
   case "$card" in
-    *"1 accepted, 1 in review, 1 blocked"*"D4"*"hold-1"*"sharpe: needs-decision"*"fm/sharpe: 1 ahead of main"*) ;;
+    *"D4"*"hold-1"*"1 accepted, 1 in review, 1 blocked"*"sharpe: needs-decision"*"fm/sharpe: 1 ahead of main"*) ;;
     *) fail "card missing facts: $card" ;;
   esac
-  pass "card is rebuilt from the plan, snapshot decisions, worker state and branch state"
+  case "$card" in *X1*) fail "another session's decision leaked into this card" ;; esac
+  pass "card is rebuilt from the plan, this session's snapshot decisions, worker state and task branches"
 }
 
 test_card_carries_guide_decisions_and_memory() {
@@ -72,7 +74,7 @@ test_card_carries_guide_decisions_and_memory() {
   printf -- '- 2026-11-20 D1: use log returns (M-0099)\n' >>"$HOME_DIR/data/sessions/quant/decisions.md"
   card=$("$DASH" card quant)
   case "$card" in
-    *"Session guide"*"Answer outcome-first"*"Decisions already made"*"use log returns"*"Session memory"*"PINNED_FACT"*"MEMORY REVIEW DUE"*) ;;
+    *"Decisions already made"*"use log returns"*"Session guide"*"Answer outcome-first"*"Session memory"*"PINNED_FACT"*"MEMORY REVIEW DUE"*) ;;
     *) fail "card lacks guide, decisions, memory or review flag: $card" ;;
   esac
   pass "card carries the guide rules, decisions already made, session memory and a review-due flag"
@@ -138,10 +140,53 @@ test_server_decisions_apply_through_upstream_paths() {
   pass "dashboard decisions close through fm-send --resolve-key and fm-captain-hold answers, and an unknown key falls back to delivery"
 }
 
+test_long_card_keeps_lines_and_priorities() {
+  local card sd="$HOME_DIR/data/sessions/quant" i
+  python3 -c "print('Summary sentence. ' * 400)" >"$sd/summary.md"
+  for i in $(seq 1 40); do "$ROOT/bin/fm-session-memory.sh" add quant "fact $i about calibration and vendor data quality checks" >/dev/null; done
+  cp "$sd/plan.md" "$sd/plan.md.keep"
+  for i in $(seq 1 80); do printf -- '- [ ] step %s: reconcile the curve inputs against the reference pricer output\n' "$i" >>"$sd/plan.md"; done
+  card=$("$DASH" card quant)
+  mv "$sd/plan.md.keep" "$sd/plan.md"
+  [ "$(printf '%s\n' "$card" | wc -l | tr -d ' ')" -gt 15 ] || fail "card collapsed onto few lines"
+  case "$card" in *"Decisions already made"*"Session guide"*) ;; *) fail "high-priority sections dropped: $card" ;; esac
+  case "$card" in *"card trimmed to 700 words; omitted:"*) ;; *) fail "omissions not named" ;; esac
+  case "$card" in *"older entries not shown"*) ;; *) fail "hidden memory entries not disclosed" ;; esac
+  rm -f "$sd/summary.md"
+  pass "a long card keeps its line structure, keeps decisions and the guide, and names what it omitted"
+}
+
+test_snapshot_failure_is_shown_not_hidden() {
+  local card out
+  touch "$FAKE/snapshot-broken"
+  card=$("$DASH" card quant)
+  case "$card" in *"FLEET SNAPSHOT UNAVAILABLE"*"UNKNOWN, not zero"*) ;; *) rm -f "$FAKE/snapshot-broken"; fail "snapshot failure hidden: $card" ;; esac
+  out=$("$DASH" render quant)
+  case "$out" in *"Fleet snapshot unavailable"*) ;; *) rm -f "$FAKE/snapshot-broken"; fail "page hides snapshot failure" ;; esac
+  case "$out" in *"Nothing is waiting on you"*) rm -f "$FAKE/snapshot-broken"; fail "page claims all clear while blind" ;; esac
+  rm -f "$FAKE/snapshot-broken"
+  pass "a failed fleet snapshot is shown as unknown on the card and page, never as an all-clear"
+}
+
+test_server_refuses_foreign_host() {
+  local port=$((20000 + RANDOM % 20000)) pid code
+  "$DASH" serve --port "$port" >/dev/null 2>&1 &
+  pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do curl -s "http://127.0.0.1:$port/api/health" >/dev/null 2>&1 && break; sleep 0.3; done
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example' "http://127.0.0.1:$port/s/quant")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$code" = 403 ] || fail "foreign Host header served: $code"
+  pass "the server refuses requests whose Host is not a loopback name"
+}
+
 fm_test_run \
   test_card_is_rebuilt_from_disk_and_snapshot \
   test_card_carries_guide_decisions_and_memory \
   test_rehydrate_prefers_disk_over_memory \
   test_session_start_digest_prints_the_card \
   test_static_page_has_decision_ui \
-  test_server_decisions_apply_through_upstream_paths
+  test_server_decisions_apply_through_upstream_paths \
+  test_long_card_keeps_lines_and_priorities \
+  test_snapshot_failure_is_shown_not_hidden \
+  test_server_refuses_foreign_host

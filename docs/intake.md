@@ -10,10 +10,15 @@ Intake keeps the model out of capture entirely:
 1. **Capture is plain code.** `fm-intake.sh add "text"` allocates an id (`M-0001`), writes the body to `state/intake/msgs/`, appends a `captured` event to `state/intake/log.jsonl`, and prints the id. It makes no model call and no network call.
 2. **Triage is a function, not an agent.** A headless `claude -p` call with every tool disabled must return JSON: `kind` (`new`, `follow-up`, `decision-answer`, `other`), the target `session`, and an optional `ref`. It can label a message but cannot act on it. Deterministic prefixes skip the model: `@<session> text` routes to that session, and `D3: text` or `answer <key>: text` is a decision answer.
 3. **Delivery reuses the inbox.** The message is written into the target session's home through that home's own `fm-inbox.sh note --request-id <id>`, so a retry never duplicates it.
-4. **State is derived, never remembered.** A message is `captured`, `triaged`, `delivered`, `acked`, or `closed`, computed from the log plus the target home's `state/inbox/handled/` directory (the receiving agent acknowledging a note moves it there).
+4. **State is derived, never remembered.** A message is `captured`, `triaged`, `delivered`, `applied`, `acked`, or `closed`, computed on every read from the log plus the target home's `state/inbox/handled/` directory (the receiving agent acknowledging a note moves it there), so no reader shows a handled message as open.
 5. **`fm-intake.sh check` is the fidelity audit.** It exits non-zero and names any message that was never triaged, never delivered, failed delivery, lost its body file, or sits unacknowledged past the bound.
 
 Triage never drops a message: if the model is unavailable or answers badly, the message goes to the primary home with `by: fallback` recorded and a note saying why.
+Triage holds a per-message lock, so the background triage, `retry`, `route` and the dashboard cannot process one message twice.
+
+An explicit decision answer (a `D3:` or `answer <key>:` prefix, or a dashboard click) is applied through upstream's own paths: `fm-send --resolve-key` for a worker's open decision, `fm-captain-hold.sh answers` for a captain-held task.
+Only an answer upstream accepted is written to the session's `decisions.md`; an unknown key, a failed apply, or a model-guessed decision answer is delivered to the first mate as a note instead and never recorded as decided.
+If the fleet snapshot cannot be read, the answer is not applied and the reason is logged.
 `fm-intake.sh route M-0007 <session>` overrides a mis-triage, and `close` retires a message answered elsewhere.
 `state/intake/snapshot.json` is rewritten atomically after every event so a dashboard can render every number from one read.
 
@@ -21,7 +26,8 @@ Config in the gitignored `config/`: `intake-triage` (`model`, the default, or `r
 
 ## Sending from chat or a terminal
 
-Register the hook once in `~/.claude/settings.json` (firstmate never edits that file for you):
+The hook is already registered in this repo's tracked `.claude/settings.json`, so it is active in every Claude Code session opened in the firstmate repo.
+To use `>>` from sessions in other repos as well, also add it to `~/.claude/settings.json` (firstmate never edits that file for you):
 
 ```json
 {
@@ -32,6 +38,8 @@ Register the hook once in `~/.claude/settings.json` (firstmate never edits that 
   }
 }
 ```
+
+Both registrations can fire for one prompt in the firstmate repo; the hook passes a key built from the session id and the prompt, and `fm-intake` treats a repeat of that key within two minutes as the same message.
 
 A prompt starting with `>>` (change it in `config/intake-prefix`) is captured and blocked, and you see `Queued M-0042`; every other prompt goes to Claude untouched.
 The check is a plain string comparison, and the hook fails open: if capture fails, the prompt reaches Claude and the error is shown.
