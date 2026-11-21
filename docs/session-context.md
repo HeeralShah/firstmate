@@ -5,7 +5,7 @@ The design keeps one chat per topic by making the chat disposable: everything th
 
 ## The rules
 
-1. **State lives on disk, not in the chat.** The intake log, `data/sessions/<id>/plan.md`, the session home's `state/*.status` lines, and read-only git queries are the record. Pages and cards are recomputed from them on every request.
+1. **State lives on disk, not in the chat.** The intake log, `data/sessions/<id>/plan.md`, the session home's `state/*.status` lines, and read-only git queries are the record. Pages and cards are recomputed from them on every request, and the card now also carries the guide, decisions already made, and session memory.
 2. **Scripts write facts; the model writes only claims.** Counts, branch heads, open decisions, and message states come from scripts. The one model-authored file is `data/sessions/<id>/summary.md`, written at checkpoints, and the card labels it a claim that the facts above it override.
 3. **Rebuild, never trust, after compaction.** `fm-dashboard.sh card <id> --rehydrate` prints the session instructions plus a fresh state card behind a rule: trust this over anything remembered, and re-check any fact the card does not confirm. Wire it to a Claude Code `SessionStart` hook with matcher `compact` (and `startup`/`resume`) so every compaction ends with the card in context:
 
@@ -20,15 +20,35 @@ The design keeps one chat per topic by making the chat disposable: everything th
 5. **Compact early, at a checkpoint.** Before a planned compaction, update `summary.md` (and tick `plan.md`) so the claim layer is current; upstream's warm-cache compaction and `/stow` already handle timing and memory curation.
 6. **Verify at the seams.** `fm-intake.sh check` audits that no captured message is lost or stuck. A claim in `summary.md` or a worker report is evidence, not truth, until the card's facts agree with it.
 
-## Files
+## The layers of memory
 
-| File | Written by | Holds |
-| --- | --- | --- |
-| `data/sessions.md` | `fm-sessions.sh` | The route: kind, repos, home |
-| `data/sessions/<id>.md` | the captain | Task-level instructions across repos |
-| `data/sessions/<id>/plan.md` | captain or worker | Steps as `- [ ]` todo, `[~]` in review, `[!]` blocked, `[x]` accepted |
-| `data/sessions/<id>/summary.md` | an agent, at checkpoints | A short claim about where things stand |
-| `state/intake/log.jsonl` | `fm-intake.sh` | Every message and decision, append-only |
+| Layer | File | Holds | Written by |
+| --- | --- | --- | --- |
+| Repo maintainer rules | the repo's `AGENTS.md` | How to work in that repo | the captain only |
+| Session instructions | `data/sessions/<id>/instructions.md` | Task-level guidance across repos | the captain |
+| Session guide | `guide.md` | Meta-rules: interaction, organisation, answer style, review cadence | an agent, curated iteratively |
+| Session memory | `memory.md` | Durable content: facts, findings, gotchas about the task | an agent, via `fm-session-memory.sh` |
+| Session decisions | `decisions.md` | Answered decisions, with the question asked | `fm-intake.sh` only |
+| Session state | `plan.md`, the log, status lines | Progress and what is open | scripts, and the captain for the plan |
+| Session summary | `summary.md` | A claim about where things stand | an agent, at checkpoints |
+| Home preferences and facts | `captain.md`, `learnings.md` | The captain's working style; fleet-wide operational facts | upstream's stow rules |
+
+Routing: knowledge about the task across repos goes to session memory; a rule about how the captain wants this session run goes to the guide; knowledge about one repo goes to that repo's `AGENTS.md`, which only the captain edits; the captain's style across all work goes to `captain.md`; fleet-wide operational facts go to `learnings.md`.
+
+## Memory: tiers, decay, review
+
+`memory.md` uses the stow entry format as trailing comments: aging (`<!--a:date-->`), perishable (`<!--p:date-->`), pinned (`<!--P-->`), and pending capture (`<!--t:NAME-->`, never archived).
+`fm-session-memory.sh` owns the mechanics: it dedupes on add, `reinforce` refreshes a date, `archive-stale` moves aging entries older than `memory-stale-after` (default 30 days) and perishable ones older than 14 days to `memory-archive.md` (never deleted), and `review` reports whether a review is due and which entries are stale.
+What to remember, merge or rewrite stays the agent's judgment under the stow rules; the script only reports and moves.
+Decisions never decay: a `decided:` line stays until the captain reopens it, and the card and briefs tell the agent not to re-ask or contradict one.
+
+## The guide
+
+`guide.md` holds meta-rules about the session itself, not the task: how the captain wants answers shaped, how work is grouped and reported, and how often memory is reviewed.
+Settings sit on `key: value` lines before the first heading (`memory-review-every: 7d`, `memory-stale-after: 30d`, `answer-style: ...`), and `fm-session-memory.sh guide <id> add "<rule>"` appends a dated rule.
+When the captain states a preference about how a session should run, the agent records it here as one line and rewrites the list down when it grows past about 25 rules, replacing superseded lines instead of piling up.
+The state card always carries the guide, so a compacted chat keeps following it.
+A due review shows on the card and the dashboard; the agent runs `review`, curates, then `reviewed`.
 
 ## The dashboard
 

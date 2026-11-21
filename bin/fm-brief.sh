@@ -17,8 +17,9 @@
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab] [--session <id>]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
-#   --session <id> inlines data/sessions/<id>.md (task-level instructions that span
-#   repos; bin/fm-sessions.sh) into the `# Task` section; a missing file is an error.
+#   --session <id> inlines data/sessions/<id>/instructions.md (task-level instructions that
+#   span repos), plus the session's decisions and memory, into the `# Task` section
+#   (bin/fm-sessions.sh); a missing instructions file is an error.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
@@ -661,14 +662,30 @@ TASK_SECTION=${TASK_SECTION%$'\n'}
 # path outside its worktree; a named session with no file is a loud error, never
 # a silently missing section.
 if [ -n "$SESSION_ID" ]; then
-  SESSION_FILE="${FM_DATA_OVERRIDE:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/data}/sessions/$SESSION_ID.md"
-  [ -r "$SESSION_FILE" ] || { echo "error: --session $SESSION_ID has no readable $SESSION_FILE (create it with bin/fm-sessions.sh add)" >&2; exit 1; }
+  SESSION_DIR="${FM_DATA_OVERRIDE:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/data}/sessions/$SESSION_ID"
+  SESSION_FILE="$SESSION_DIR/instructions.md"
+  [ -r "$SESSION_FILE" ] || { echo "error: --session $SESSION_ID has no readable $SESSION_FILE (create the session with bin/fm-sessions.sh add)" >&2; exit 1; }
   TASK_SECTION="$TASK_SECTION
 
 ## Session instructions ($SESSION_ID)
 Task-level guidance that applies across every repo in this session. The repo's own AGENTS.md or CLAUDE.md still governs that repo's conventions and wins on any conflict about repo mechanics.
 
 $(cat "$SESSION_FILE")"
+  if [ -r "$SESSION_DIR/decisions.md" ] && grep -q '^- ' "$SESSION_DIR/decisions.md"; then
+    TASK_SECTION="$TASK_SECTION
+
+### Decisions already made in this session
+Do not re-ask or contradict these; surface a conflict instead of overriding one.
+
+$(grep '^- ' "$SESSION_DIR/decisions.md" | tail -n 20)"
+  fi
+  if [ -r "$SESSION_DIR/memory.md" ] && grep -q '^- ' "$SESSION_DIR/memory.md"; then
+    TASK_SECTION="$TASK_SECTION
+
+### Session memory (durable facts about this task; confirm against the code before relying on one)
+
+$(grep '^- ' "$SESSION_DIR/memory.md" | tail -n 25)"
+  fi
 fi
 
 # One shared string keeps the ship and scout infrastructure rule identical.

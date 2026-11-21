@@ -52,23 +52,29 @@ A session is a named lane of work that can span several projects: a theme (`quan
 It never creates or launches a secondmate; to give a session its own isolated home, provision the secondmate first (the `secondmate-provisioning` skill) and point `--home` at it.
 A session with `home: primary` is a routing label on the main home, useful for grouping and for triage.
 
-### Session instructions
+### Session folder
 
-Each session also has a task-level instruction file at `data/sessions/<id>.md`, which `fm-sessions.sh add` creates as a stub and you edit.
-It holds what applies to all work in that session across its repos: the goal, the approach, theme conventions, what to verify.
-It is a separate layer from each repo's `AGENTS.md` or `CLAUDE.md`, which stays the repo-maintainer layer; on a conflict about repo mechanics the repo file wins.
-`fm-brief.sh <id> --session <session-id>` inlines the file into the worker's brief (a missing file is an error), so the worker never needs a path outside its worktree.
-An intake delivery to a session whose file exists carries its path and the `--session` hint.
-`fm-sessions.sh instructions <session-id>` prints the path, and `remove` leaves the file in place.
-The file is private under `data/` and is never committed to any project.
+`fm-sessions.sh add` creates `data/sessions/<id>/` with five stubs, each with one job:
 
-## Projects root
+- `instructions.md`: task-level guidance across the session's repos, written by you. It is a separate layer from each repo's `AGENTS.md` or `CLAUDE.md`, which stays the repo-maintainer layer and wins on a conflict about repo mechanics.
+- `guide.md`: meta-rules for how the session is run (interaction, organisation, answer style, review cadence), curated iteratively.
+- `memory.md`: durable content memory with stow tiers, so it decays.
+- `decisions.md`: appended by script when a decision is answered.
+- `plan.md`: the step checklist the dashboard shows.
 
-Firstmate reads clones from `$FM_HOME/projects`.
-`fm-projects-root.sh set ~/Projects` makes `projects/` a symlink to your shared folder so firstmate sees those repos in place, with no second copy.
-It refuses to replace a `projects/` that already holds clones, and it registers nothing: `scan` lists git repos under the root and whether each is in `data/projects.md`, and registering one (delivery mode, consent) stays with the `project-management` skill.
+`fm-brief.sh <id> <repo> --session <session-id>` inlines the instructions, the latest decisions and the memory into the worker's brief (a missing instructions file is an error), so the worker needs no path outside its worktree.
+An intake delivery to a session carries the instructions path and the `--session` hint.
+`remove` leaves the folder in place, and the folder is private under `data/`.
+[session-context.md](session-context.md) owns how memory, the guide and decisions are curated.
+
+## Projects source and per-session checkouts
+
+`fm-projects-root.sh set ~/Projects` records the folder firstmate discovers repos in (`config/projects-source`); firstmate never writes to it.
+`fm-session-checkout.sh create <session>` gives each session its own clone of every repo it spans at `projects/<repo>/<session>`, made with `git clone --local` from the source with `origin` reset to the source repo's real remote.
+Two sessions on the same repo therefore never share a working tree, index or branch.
+`data/sessions/<id>/repos/<repo>` is a relative symlink view to each clone: point a session home's projects directory at it (a secondmate's `projects/`, or `FM_PROJECTS_OVERRIDE`) and upstream tooling that expects `<projects>/<repo>` to be a clone works unchanged.
+`fm-projects-root.sh scan` lists repos in the source and whether each is in `data/projects.md`; registering one stays with the `project-management` skill.
 Firstmate still only reads projects; workers change code in isolated task worktrees.
-A secondmate home keeps its own `projects/`, so link it separately if a secondmate should see the shared folder.
 
 ## Limits
 

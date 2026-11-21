@@ -30,7 +30,19 @@ from urllib.parse import urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fm_intake as fi  # noqa: E402  (shares log, sessions, routing)
 
-PROJECTS = os.environ.get("FM_PROJECTS_OVERRIDE") or os.path.join(fi.FM_HOME, "projects")
+PROJECTS = os.path.join(fi.FM_HOME, "projects")
+import fm_session_memory as fm_mem  # noqa: E402
+
+
+def source_root():
+    v = os.environ.get("FM_PROJECTS_SOURCE") or fi.read_setting("projects-source")
+    return v if v and os.path.isdir(v) else ""
+
+
+def repo_path(name, sid):
+    """The session's own clone when it exists, else the source repo (read-only)."""
+    own = os.path.join(PROJECTS, name, sid)
+    return own if os.path.exists(os.path.join(own, ".git")) else os.path.join(source_root(), name)
 STEP_MARK = {"x": "accepted", "~": "review", "!": "blocked", " ": "todo"}
 CARD_WORDS = 700
 
@@ -125,7 +137,8 @@ def repos_for(sid):
         names = [r.strip() for r in s["repos"].split(",") if r.strip()]
     else:
         try:
-            names = sorted(n for n in os.listdir(PROJECTS) if os.path.exists(os.path.join(PROJECTS, n, ".git")))
+            src = source_root()
+            names = sorted(n for n in os.listdir(src) if os.path.exists(os.path.join(src, n, ".git"))) if src else []
         except OSError:
             names = []
     return names
@@ -143,7 +156,9 @@ def code_changes(sid):
     """Read-only: fm/* task branches per repo, commits ahead of the default branch, files by dir."""
     out = []
     for name in repos_for(sid):
-        repo = os.path.join(PROJECTS, name)
+        repo = repo_path(name, sid)
+        if not os.path.exists(os.path.join(repo, ".git")):
+            continue
         base = (git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip().split("/", 1) + [""])[-1] \
             or next((b for b in ("main", "master") if git(repo, "rev-parse", "--verify", "-q", b).strip()), "")
         if not base:
@@ -165,6 +180,16 @@ def code_changes(sid):
     return out
 
 
+def tail_entries(sid, name, n):
+    return [l[2:] for l in fm_mem.read_lines(os.path.join(sdir(sid), name)) if l.startswith("- ")][-n:]
+
+
+def guide_rules(sid):
+    lines = fm_mem.read_lines(os.path.join(sdir(sid), "guide.md"))
+    settings = [l for l in lines if re.match(r"^[a-z-]+:\s", l)]
+    return settings, [l[2:] for l in lines if l.startswith("- ")]
+
+
 def facts(sid):
     steps = plan(sid)
     counts = {k: sum(1 for s in steps if s["state"] == k) for k in ("accepted", "review", "blocked", "todo")}
@@ -173,7 +198,11 @@ def facts(sid):
     attention = len(ds) + counts["blocked"] + sum(1 for w in workers(sid) if w["state"] in ("blocked", "failed"))
     return {"id": sid, "info": session_info(sid), "steps": steps, "counts": counts, "decisions": ds,
             "workers": workers(sid), "items": session_items(sid), "open_items": open_items,
-            "attention": attention, "summary": read_text(os.path.join(sdir(sid), "summary.md")).strip(),
+            "attention": attention, "memory": [(t, tx) for _, t, _, tx in fm_mem.entries(sid)] if os.path.isdir(sdir(sid)) else [],
+            "stale": len(fm_mem.stale(sid)) if os.path.isdir(sdir(sid)) else 0,
+            "review": fm_mem.review_status(sid) if os.path.isdir(sdir(sid)) else (False, ""),
+            "decided": tail_entries(sid, "decisions.md", 10), "guide": guide_rules(sid),
+            "summary": read_text(os.path.join(sdir(sid), "summary.md")).strip(),
             "changes": code_changes(sid)}
 
 
@@ -207,6 +236,20 @@ def card(sid, rehydrate=False):
         L.append("\n## Branches")
         for ch in f["changes"][:8]:
             L.append("- %s %s: %s ahead of %s; head %s" % (ch["repo"], ch["branch"], ch["ahead"], ch["base"], ch["head"]))
+    gset, grules = f["guide"]
+    if gset or grules:
+        L.append("\n## Session guide (meta-rules: how this captain wants the session run; follow them)")
+        L += ["- %s" % x for x in gset + grules[-15:]]
+    if f["decided"]:
+        L.append("\n## Decisions already made (do not re-ask; change only if the captain reopens one)")
+        L += ["- %s" % x for x in f["decided"]]
+    if f["memory"]:
+        L.append("\n## Session memory (durable content; pinned first, then newest)")
+        pinned = [x for x in f["memory"] if x[0] == "pinned"]
+        rest = [x for x in f["memory"] if x[0] != "pinned"][-12:]
+        L += ["- %s%s" % (tx, " [pinned]" if t == "pinned" else "") for t, tx in pinned + rest]
+    if f["review"][0]:
+        L.append("\nMEMORY REVIEW DUE: %s. Run `fm-session-memory.sh review %s` and curate." % (f["review"][1], sid))
     if f["summary"]:
         L.append("\n## Captain/agent summary (a claim, written at a checkpoint; facts above win)\n" + f["summary"][:1500])
     text = "\n".join(L)
@@ -215,7 +258,7 @@ def card(sid, rehydrate=False):
         text = " ".join(words[:CARD_WORDS]) + "\n[card truncated: run `fm-dashboard.sh card %s` for the full card]" % sid
     if not rehydrate:
         return text + "\n"
-    ins = read_text(os.path.join(fi.DATA, "sessions", sid + ".md"), 8000)
+    ins = read_text(os.path.join(sdir(sid), "instructions.md"), 8000)
     return ("SESSION CONTEXT, rebuilt from disk after compaction or restart. Trust this over anything remembered "
             "from earlier in the conversation; if they disagree, this is right and the conversation is stale. "
             "Do not act on a remembered fact this card does not confirm; re-check it.\n\n"
@@ -308,8 +351,17 @@ def page_live(f):
                          e(d["key"]), e(d["task"]), e(d["text"]), e(json.dumps(d["key"])), e(json.dumps(d["key"])), e(json.dumps(d["key"]))))
     if not f["decisions"]:
         parts.append('<div class="mut">Nothing is waiting on you.</div>')
+    if f["decided"]:
+        parts.append("<h2>Decided</h2><div class='box'>%s</div>" % "".join("<div>%s</div>" % e(x) for x in f["decided"][::-1]))
+    if f["review"][0]:
+        parts.append("<div class='box dec'><b>Memory review due.</b> %s. Ask the agent to run the session memory review.</div>" % e(f["review"][1]))
     parts.append("<h2>Session summary</h2>")
     parts.append('<div class="box"><pre>%s</pre></div>' % e(f["summary"] or "(no summary yet: write data/sessions/%s/summary.md at a checkpoint)" % f["id"]))
+    gset, grules = f["guide"]
+    parts.append("<h2>Memory and guide</h2><details class='box'><summary>%d memory entries (%d stale) · %d guide rules</summary>"
+                 "<b>Memory</b><pre>%s</pre><b>Guide</b><pre>%s</pre></details>" % (
+                     len(f["memory"]), f["stale"], len(grules),
+                     e("\n".join("[%s] %s" % (t, tx) for t, tx in f["memory"]) or "(empty)"), e("\n".join(gset + grules) or "(empty)")))
     parts.append("<h2>Workers</h2>")
     if f["workers"]:
         parts.append("<table><tr><th>Task</th><th>State</th><th>Latest</th><th>Age</th></tr>%s</table>" % "".join(

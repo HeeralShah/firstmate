@@ -29,7 +29,21 @@ SESSION_ERROR=
 
 sessions_registry_path() { printf '%s/sessions.md\n' "$DATA"; }
 # Task-level instructions for a session; applies across all its repos.
-sessions_instructions_path() { printf '%s/sessions/%s.md\n' "$DATA" "$1"; }
+sessions_dir() { printf '%s/sessions/%s\n' "$DATA" "$1"; }
+sessions_instructions_path() { printf '%s/sessions/%s/instructions.md\n' "$DATA" "$1"; }
+
+# The source folder firstmate discovers repos from (for example ~/Projects):
+# FM_PROJECTS_SOURCE, else the first line of config/projects-source. Prints the
+# absolute path, or returns 1 when none is configured. Session checkouts are
+# cloned FROM it and never written to; the caller sets CONFIG.
+sessions_source_root() {
+  local v=${FM_PROJECTS_SOURCE:-} f="${CONFIG:-}/projects-source"
+  if [ -z "$v" ] && [ -r "$f" ]; then
+    v=$(sed -n '1{s/[[:space:]]*$//;p;q;}' "$f")
+  fi
+  [ -n "$v" ] && [ -d "$v" ] || return 1
+  (cd "$v" && pwd -P)
+}
 
 sessions_parse_line() {  # <line>  -> 0 parsed, 1 not a session line
   local line=$1

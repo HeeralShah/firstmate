@@ -42,6 +42,19 @@ test_card_is_rebuilt_from_disk() {
   pass "card is rebuilt from the plan, open decision and branch state on disk"
 }
 
+test_card_carries_guide_decisions_and_memory() {
+  local card
+  "$ROOT/bin/fm-session-memory.sh" add quant --pin "PINNED_FACT" >/dev/null
+  "$ROOT/bin/fm-session-memory.sh" guide quant add "Answer outcome-first" >/dev/null
+  printf -- '- 2026-11-20 D1: use log returns (M-0099)\n' >>"$HOME_DIR/data/sessions/quant/decisions.md"
+  card=$("$DASH" card quant)
+  case "$card" in
+    *"Session guide"*"Answer outcome-first"*"Decisions already made"*"use log returns"*"Session memory"*"PINNED_FACT"*"MEMORY REVIEW DUE"*) ;;
+    *) fail "card lacks guide, decisions, memory or review flag: $card" ;;
+  esac
+  pass "card carries the guide rules, decisions already made, session memory and a review-due flag"
+}
+
 test_rehydrate_prefers_disk_over_memory() {
   local out
   out=$("$DASH" card quant --rehydrate)
@@ -84,6 +97,7 @@ test_server_decision_flow() {
 
 fm_test_run \
   test_card_is_rebuilt_from_disk \
+  test_card_carries_guide_decisions_and_memory \
   test_rehydrate_prefers_disk_over_memory \
   test_static_page_has_decision_ui \
   test_server_decision_flow

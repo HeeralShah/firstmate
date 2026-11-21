@@ -192,7 +192,9 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-sessions.sh`         | Manage the sessions registry: named lanes of work spanning projects, each backed by the primary or a secondmate |
 | `fm-sessions-lib.sh`     | Sessions registry parser and home resolution shared by intake and `fm-sessions.sh` |
 | `fm-dashboard.sh`        | Serve the per-session dashboard (progress, decisions by UI, code changes), print a disk-derived state card for rehydration after compaction, or render a static snapshot ([session-context.md](session-context.md)) |
-| `fm-projects-root.sh`    | Point `projects/` at a shared parent folder such as `~/Projects`, and scan it for unregistered repos |
+| `fm-projects-root.sh`    | Record the source folder repos are discovered in (such as `~/Projects`) and scan it for unregistered repos |
+| `fm-session-checkout.sh` | Clone each session's repos to `projects/<repo>/<session>` from the source and build the per-session symlink view |
+| `fm-session-memory.sh`   | Session durable memory with tiers, decay and review cadence, plus the session guide's dated meta-rules ([session-context.md](session-context.md)) |
 | `fm-mail.sh`             | General-purpose mail plane: read unseen IMAP mail, send one SMTP message, or surface new mail as a `check` wake via `poll` (configuration in the home's gitignored `.env`) |
 | `fm-mail.py`             | The IMAP/SMTP engine behind `fm-mail.sh` |
 | `fm-mail-check.sh`       | Standing received-mail poll: `arm` registers a watcher check that runs `fm-mail.sh poll` on the watcher cadence (new mail still wakes via the poll; the check's own line also wakes unless the poll is a proven no-op), `disarm` removes it |

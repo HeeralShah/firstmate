@@ -15,12 +15,15 @@
 #   fm-sessions.sh instructions <id>     print the path of the session's instruction file
 #   fm-sessions.sh remove <id>
 #
-# Each session has task-level instructions in data/sessions/<id>.md, created as a
-# stub by `add` and edited by the captain. They apply across every repo in the
+# Each session owns a folder data/sessions/<id>/ created by `add` with stubs:
+# instructions.md (task-level, edited by the captain), guide.md (meta-rules for
+# how the session is run, curated iteratively), memory.md (durable tiered
+# content memory), decisions.md (script-appended), and plan.md. They apply across every repo in the
 # session (repo AGENTS.md/CLAUDE.md stays the repo-maintainer layer). Pass
-# `--session <id>` to bin/fm-brief.sh to inline them into a worker brief; `remove`
-# leaves the file in place. The directory data/sessions/<id>/ holds plan.md and
-# summary.md, which the dashboard and state card read (bin/fm-dashboard.sh).
+# `--session <id>` to bin/fm-brief.sh to inline instructions, decisions and memory
+# into a worker brief; `remove` leaves the folder in place. Per-session repo
+# checkouts: bin/fm-session-checkout.sh. Dashboard and state card:
+# bin/fm-dashboard.sh.
 #
 # `add` records the route only. It never creates or launches a secondmate; to
 # back a session with its own home, provision the secondmate first (skill
@@ -33,7 +36,7 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-sessions-lib.sh disable=SC1091
 . "$SELF_DIR/fm-sessions-lib.sh"
 
@@ -66,12 +69,13 @@ cmd_add() {
     theme) [ -n "$repos" ] || die "a theme session needs --repos a,b,c" ;;
   esac
   if [ "$repos" != '*' ]; then
-    local r list=""
+    local r list="" SRC
+    SRC=$(sessions_source_root) || die "no projects source configured: run bin/fm-projects-root.sh set <dir>"
     IFS=',' read -r -a arr <<<"$repos"
     for r in "${arr[@]}"; do
       r=${r#"${r%%[![:space:]]*}"}; r=${r%"${r##*[![:space:]]}"}
       [ -n "$r" ] || continue
-      [ -d "$PROJECTS/$r" ] || die "repo '$r' is not a directory under $PROJECTS (set the root with bin/fm-projects-root.sh)"
+      [ -e "$SRC/$r/.git" ] || die "repo '$r' is not a git repo under $SRC (set the source with bin/fm-projects-root.sh)"
       list="${list:+$list, }$r"
     done
     repos=$list
@@ -85,11 +89,13 @@ cmd_add() {
   printf -- '- %s - %s (kind: %s; repos: %s; home: %s; added %s)\n' \
     "$id" "$summary" "$kind" "$repos" "$home" "$(date +%Y-%m-%d)" >>"$file"
   mkdir -p "$DATA/sessions/$id"
-  local ifile
-  ifile=$(sessions_instructions_path "$id")
-  if [ ! -e "$ifile" ]; then
-    printf '# Session %s: task-level instructions\n\n%s\n\nWrite what applies to ALL work in this session, across repos: goals, approach, conventions for\nthis theme, what to check, what not to touch. Repo-specific maintainer rules belong in each\nrepo AGENTS.md or CLAUDE.md, not here.\n' "$id" "$summary" >"$ifile"
-  fi
+  local sd; sd=$(sessions_dir "$id")
+  [ -e "$sd/instructions.md" ] || printf '# Session %s: task-level instructions\n\n%s\n\nWrite what applies to ALL work in this session, across repos: goals, approach, conventions for\nthis theme, what to check, what not to touch. Repo-specific maintainer rules belong in each\nrepo AGENTS.md or CLAUDE.md, not here.\n' "$id" "$summary" >"$sd/instructions.md"
+  [ -e "$sd/guide.md" ] || printf '# Session %s guide: meta-rules\nHow this session wants to be run. Curated iteratively: when the captain states a preference about\ninteraction, organisation, answer style or review rhythm, record it under Rules as one dated line,\nreplacing a superseded line instead of piling up. Keep it short (about 40 lines).\n\nmemory-review-every: 7d\nmemory-stale-after: 30d\nanswer-style: concise, outcome first\n\n## Rules\n' "$id" >"$sd/guide.md"
+  [ -e "$sd/memory.md" ] || printf '# Session %s memory (durable content; tiered, decays; see docs/session-context.md)\n' "$id" >"$sd/memory.md"
+  [ -e "$sd/decisions.md" ] || printf '# Session %s decisions (appended by script when a decision is answered)\n' "$id" >"$sd/decisions.md"
+  [ -e "$sd/plan.md" ] || printf '# Session %s plan\n# - [ ] todo   - [~] in review   - [!] blocked   - [x] accepted\n' "$id" >"$sd/plan.md"
+  local ifile; ifile=$(sessions_instructions_path "$id")
   printf 'added session %s (%s, repos: %s, home: %s)\n  instructions: %s\n' "$id" "$kind" "$repos" "$home" "$ifile"
 }
 

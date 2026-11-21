@@ -1,31 +1,29 @@
 #!/usr/bin/env bash
-# fm-projects-root.sh - point this home's projects/ at a shared parent folder.
+# fm-projects-root.sh - name the folder firstmate discovers your repos in.
 #
-# Firstmate reads project clones from $FM_HOME/projects. Many operators already
-# keep every repo flat under one folder (for example ~/Projects). This makes
-# projects/ a symlink to that folder so firstmate sees those repos in place and
-# no second copy is cloned. Hard rule 1 is unchanged: firstmate still reads
-# projects and never writes to them; workers still change code only in isolated
-# task worktrees.
+# Many operators keep every repo flat under one folder (for example ~/Projects).
+# `set` records that folder as the projects SOURCE in config/projects-source.
+# Firstmate never writes to it: sessions get their own clones under
+# projects/<repo>/<session> (bin/fm-session-checkout.sh), made with
+# `git clone --local` from the source, so your own repos stay untouched.
 #
 # Usage:
-#   fm-projects-root.sh show              where projects/ points and what is registered
-#   fm-projects-root.sh set <dir>         link projects/ -> <dir>
-#   fm-projects-root.sh scan              git repos under the root, registered or not
+#   fm-projects-root.sh show              the source folder and the session checkouts
+#   fm-projects-root.sh set <dir>         record <dir> as the source
+#   fm-projects-root.sh scan              git repos in the source, registered or not
 #
-# `set` refuses to replace a projects/ that already holds clones (move or remove
-# them yourself first), refuses a non-directory target, and never touches the
-# target folder. It does not register anything: registering a project (delivery
-# mode, consent) is the project-management skill's job, so `scan` only lists.
-#
-# Environment: FM_HOME (the home whose projects/ is managed).
+# `set` refuses a non-directory. It registers nothing: registering a project
+# (delivery mode, consent) is the project-management skill's job, so `scan` only
+# lists. Environment: FM_HOME, FM_PROJECTS_SOURCE (overrides the recorded value).
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-LINK="$FM_HOME/projects"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-sessions-lib.sh disable=SC1091
+. "$SELF_DIR/fm-sessions-lib.sh"
 
 die() { printf 'fm-projects-root: %s\n' "$*" >&2; exit 1; }
 
@@ -35,13 +33,14 @@ registered() {  # <name>
 }
 
 cmd_show() {
-  if [ -L "$LINK" ]; then
-    printf 'projects/ -> %s\n' "$(readlink "$LINK")"
-  elif [ -d "$LINK" ]; then
-    printf 'projects/ is a real directory (%s clones)\n' "$(find "$LINK" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+  local src n
+  if src=$(sessions_source_root); then
+    printf 'source: %s\n' "$src"
   else
-    printf 'projects/ does not exist\n'
+    printf 'source: (none; run: fm-projects-root.sh set <dir>)\n'
   fi
+  n=$(find "$FM_HOME/projects" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | wc -l | tr -d ' ')
+  printf 'session checkouts: %s under %s/projects/<repo>/<session>\n' "$n" "$FM_HOME"
 }
 
 cmd_set() {
@@ -50,24 +49,14 @@ cmd_set() {
   case "$target" in "~"/*) target="$HOME/${target#"~"/}" ;; esac
   [ -d "$target" ] || die "'$target' is not a directory"
   target=$(cd "$target" && pwd -P)
-  if [ -L "$LINK" ]; then
-    [ "$(readlink "$LINK")" = "$target" ] && { printf 'already set: projects/ -> %s\n' "$target"; return 0; }
-    rm "$LINK"
-  elif [ -d "$LINK" ]; then
-    [ -z "$(find "$LINK" -mindepth 1 -maxdepth 1 -print -quit)" ] \
-      || die "projects/ already holds clones; move them out first (nothing was changed)"
-    rmdir "$LINK"
-  elif [ -e "$LINK" ]; then
-    die "projects exists and is not a directory or symlink"
-  fi
-  ln -s "$target" "$LINK"
-  printf 'projects/ -> %s\n' "$target"
+  mkdir -p "$CONFIG"
+  printf '%s\n' "$target" >"$CONFIG/projects-source"
+  printf 'source: %s\n' "$target"
 }
 
 cmd_scan() {
-  local root name
-  [ -d "$LINK" ] || die "projects/ is not set up; run: fm-projects-root.sh set <dir>"
-  root=$(cd "$LINK" && pwd -P)
+  local root d name
+  root=$(sessions_source_root) || die "no source configured; run: fm-projects-root.sh set <dir>"
   for d in "$root"/*/; do
     name=$(basename "$d")
     [ -e "$d/.git" ] || continue

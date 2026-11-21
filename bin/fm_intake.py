@@ -450,6 +450,43 @@ def shutil_which(name):
     return None
 
 
+def record_decision(mid, tri):
+    """Append an answered decision to the session's decisions.md (idempotent per message id)."""
+    if tri.get("kind") != "decision-answer":
+        return
+    sid = tri.get("session") or "primary"
+    d = os.path.join(DATA, "sessions", sid)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "decisions.md")
+    try:
+        with open(path) as f:
+            existing = f.read()
+    except OSError:
+        existing = "# Session %s decisions (appended by script when a decision is answered)\n" % sid
+    if "(%s)" % mid in existing:
+        return
+    body = " ".join(read_body(mid).split())
+    body = re.sub(r"^(?:@\S+\s+)?(?:answer\s+\S+|D-?\d+)\s*:\s*", "", body, flags=re.I)
+    key = tri.get("ref") or "?"
+    q = ""
+    home, _ = session_home(sid)
+    try:
+        for name in os.listdir(os.path.join(home or FM_HOME, "state")):
+            if not name.endswith(".status"):
+                continue
+            with open(os.path.join(home or FM_HOME, "state", name)) as f:
+                for line in f:
+                    m = re.search(r"needs-decision.*\[key=%s\]\s*:?\s*(.*)" % re.escape(key), line)
+                    if m:
+                        q = m[1].strip()[:160]
+    except OSError:
+        pass
+    line = "- %s %s: %s%s (%s)\n" % (now()[:10], key, body[:300], (" [asked: %s]" % q) if q else "", mid)
+    with open(path, "w") as f:
+        f.write(existing if existing.endswith("\n") else existing + "\n")
+        f.write(line)
+
+
 def cmd_triage(args):
     if not args or not valid_id(args[0]):
         die("usage: fm-intake.sh triage M-NNNN")
@@ -461,6 +498,7 @@ def cmd_triage(args):
     if it["state"] == "captured":
         tri, _ = classify(mid)
         append(dict(tri, event="triaged", id=mid))
+        record_decision(mid, tri)
         it = {i["id"]: i for i in derive()}[mid]
     if it["state"] in ("triaged", "delivery_failed"):
         deliver(it)
@@ -478,7 +516,7 @@ def deliver(it):
         return False
     head = "[intake %s kind=%s session=%s%s]" % (
         it["id"], tri.get("kind"), sid, (" ref=%s" % tri["ref"]) if tri.get("ref") else "")
-    ifile = os.path.join(DATA, "sessions", sid + ".md")
+    ifile = os.path.join(DATA, "sessions", sid, "instructions.md")
     if sid != "primary" and os.path.exists(ifile):
         head += "\nsession-instructions: %s (pass --session %s to fm-brief.sh)" % (ifile, sid)
     body = head + "\n" + read_body(it["id"])
@@ -526,6 +564,7 @@ def cmd_route(args):
         die("no message %s" % mid)
     tri = dict(it["triage"] or {"kind": "new"}, session=sid, by="captain")
     append(dict(tri, event="triaged", id=mid))
+    record_decision(mid, tri)
     deliver({i["id"]: i for i in derive()}[mid])
     return 0
 

@@ -25,6 +25,7 @@ REPOS="$TMP_ROOT/repos"
 mkdir -p "$HOME_DIR"/{state,data,config} "$SM_HOME"/{state,data,config} "$REPOS"/{repoa,repob}
 git -C "$REPOS/repoa" init -q
 git -C "$REPOS/repob" init -q
+for r in repoa repob; do git -C "$REPOS/$r" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init; done
 printf -- '- repoa [local-only] - A (added 2026-11-20)\n' >"$HOME_DIR/data/projects.md"
 printf -- '- quant-sm - quant model work (home: %s; scope: quant models; projects: repoa; added 2026-11-20)\n' \
   "$SM_HOME" >"$HOME_DIR/data/secondmates.md"
@@ -33,39 +34,46 @@ printf 'rules\n' >"$HOME_DIR/config/intake-triage"
 export FM_HOME="$HOME_DIR"
 export FM_INTAKE_NO_TRIAGE=1
 
-test_projects_root_links_and_scans() {
+test_projects_root_records_source_and_scans() {
   local scan
   "$PROOT" set "$REPOS" >/dev/null
-  [ "$(readlink "$HOME_DIR/projects")" = "$(cd "$REPOS" && pwd -P)" ] || fail "set did not link projects/"
+  [ "$(cat "$HOME_DIR/config/projects-source")" = "$(cd "$REPOS" && pwd -P)" ] || fail "set did not record the source"
+  [ ! -e "$HOME_DIR/projects" ] || fail "set must not create or link projects/"
   scan=$("$PROOT" scan)
   case "$scan" in
     *repoa*"registered"*repob*"not registered"*) ;;
     *) fail "scan output wrong: $scan" ;;
   esac
-  pass "projects root links projects/ to the shared folder and scan reports registration"
+  if "$PROOT" set "$REPOS/nope" >/dev/null 2>&1; then fail "accepted a non-directory"; fi
+  pass "projects root records the source folder, never links projects/, and scan reports registration"
 }
 
-test_projects_root_refuses_real_clones() {
-  rm "$HOME_DIR/projects"
-  mkdir -p "$HOME_DIR/projects/clone"
-  if "$PROOT" set "$REPOS" >/dev/null 2>&1; then fail "replaced a populated projects/"; fi
-  [ -d "$HOME_DIR/projects/clone" ] || fail "refusal still removed the clone"
-  rm -r "$HOME_DIR/projects"
-  "$PROOT" set "$REPOS" >/dev/null
-  pass "projects root refuses to replace real clones and changes nothing"
+test_session_checkout_clones_from_source() {
+  local before after
+  "$SESSIONS" add quant --summary "Quant model work" --kind theme --repos repoa,repob --home quant-sm >/dev/null
+  before=$(git -C "$REPOS/repoa" status --porcelain | wc -l | tr -d ' ')
+  git -C "$REPOS/repoa" remote add origin https://example.com/repoa.git 2>/dev/null || true
+  "$ROOT/bin/fm-session-checkout.sh" create quant >/dev/null
+  [ -e "$HOME_DIR/projects/repoa/quant/.git" ] || fail "no clone at projects/<repo>/<session>"
+  [ -e "$HOME_DIR/data/sessions/quant/repos/repoa/.git" ] || fail "view symlink does not resolve to the clone"
+  [ "$(git -C "$HOME_DIR/projects/repoa/quant" remote get-url origin)" = "https://example.com/repoa.git" ] || fail "origin not reset to the real remote"
+  after=$(git -C "$REPOS/repoa" status --porcelain | wc -l | tr -d ' ')
+  [ "$before" = "$after" ] || fail "source repo was modified"
+  if "$ROOT/bin/fm-session-checkout.sh" create quant nope >/dev/null 2>&1; then fail "accepted a repo outside scope"; fi
+  pass "session checkout clones projects/<repo>/<session> from the source, resets origin, builds the view, and leaves the source alone"
 }
 
 test_sessions_validate_routes() {
-  "$SESSIONS" add quant --summary "Quant model work" --kind theme --repos repoa,repob --home quant-sm >/dev/null
   "$SESSIONS" add chores --summary "Small fixes anywhere" --kind chores >/dev/null
   if "$SESSIONS" add ghost --summary "x" --kind theme --repos repoa --home nobody >/dev/null 2>&1; then
     fail "accepted an unknown secondmate"
   fi
   if "$SESSIONS" add bad --summary "x" --kind theme --repos nope >/dev/null 2>&1; then
-    fail "accepted a repo outside the projects root"
+    fail "accepted a repo outside the source folder"
   fi
   case "$("$SESSIONS" list)" in *quant*quant-sm*chores*) ;; *) fail "list wrong" ;; esac
-  pass "sessions add validates secondmate and repos, and list shows both"
+  for f in instructions guide memory decisions plan; do [ -f "$HOME_DIR/data/sessions/quant/$f.md" ] || fail "missing stub $f.md"; done
+  pass "sessions add validates secondmate and repos, creates the session folder, and list shows both"
 }
 
 test_session_instructions_reach_the_brief() {
@@ -73,11 +81,13 @@ test_session_instructions_reach_the_brief() {
   ifile=$("$SESSIONS" instructions quant)
   [ -r "$ifile" ] || fail "add did not create the instructions stub"
   printf '\nALWAYS_USE_ZSCORE_NORMALISATION\n' >>"$ifile"
+  "$ROOT/bin/fm-session-memory.sh" add quant "REFERENCE_MODEL_B_IS_TRUSTED" >/dev/null
+  printf -- '- 2026-11-20 D1: use log returns (M-9999)\n' >>"$HOME_DIR/data/sessions/quant/decisions.md"
   "$ROOT/bin/fm-brief.sh" t1 repoa --mode local-only --session quant >/dev/null 2>&1 || fail "brief with --session failed"
   brief=$(cat "$HOME_DIR/data/t1/brief.md")
-  case "$brief" in *"Session instructions (quant)"*ALWAYS_USE_ZSCORE_NORMALISATION*) ;; *) fail "brief lacks session instructions" ;; esac
+  case "$brief" in *"Session instructions (quant)"*ALWAYS_USE_ZSCORE_NORMALISATION*"Decisions already made"*"use log returns"*"Session memory"*REFERENCE_MODEL_B_IS_TRUSTED*) ;; *) fail "brief lacks session instructions, decisions or memory" ;; esac
   if "$ROOT/bin/fm-brief.sh" t2 repoa --mode local-only --session nosuch >/dev/null 2>&1; then fail "brief accepted a session with no file"; fi
-  pass "session instructions are created as a stub and inlined into briefs, and a missing file is refused"
+  pass "session instructions, decisions and memory are inlined into briefs, and a missing instructions file is refused"
 }
 
 test_capture_needs_no_model() {
@@ -146,10 +156,41 @@ test_unroutable_session_fails_visibly() {
   pass "an unroutable session records delivery_failed and check names it"
 }
 
+test_answered_decision_is_logged_to_decisions_file() {
+  local out
+  printf '2026-11-20T10:05:00Z needs-decision [key=D3]: Use log or simple returns?\n' >"$SM_HOME/state/sharpe.status"
+  "$INTAKE" add "@quant D3: simple returns" >/dev/null
+  "$INTAKE" triage M-0006
+  out=$(cat "$HOME_DIR/data/sessions/quant/decisions.md")
+  case "$out" in *"D3: simple returns"*"[asked: Use log or simple returns?]"*"(M-0006)"*) ;; *) fail "decisions.md: $out" ;; esac
+  "$INTAKE" route M-0006 quant >/dev/null
+  [ "$(grep -c '(M-0006)' "$HOME_DIR/data/sessions/quant/decisions.md")" = 1 ] || fail "decision recorded twice"
+  pass "an answered decision is appended once to decisions.md with the question it answered"
+}
+
+test_session_memory_tiers_decay_and_cadence() {
+  local mem="$ROOT/bin/fm-session-memory.sh" out sd="$HOME_DIR/data/sessions/quant"
+  "$mem" add quant --pin "PINNED_FACT" >/dev/null
+  out=$("$mem" add quant "REFERENCE_MODEL_B_IS_TRUSTED")
+  case "$out" in *"already remembered"*) ;; *) fail "duplicate not caught: $out" ;; esac
+  printf -- '- OLD_FACT <!--a:2020-01-01-->\n' >>"$sd/memory.md"
+  out=$("$mem" review quant)
+  case "$out" in *"REVIEW DUE"*"stale (aging, 2020-01-01): OLD_FACT"*) ;; *) fail "review: $out" ;; esac
+  "$mem" archive-stale quant >/dev/null
+  grep -q OLD_FACT "$sd/memory-archive.md" || fail "stale entry not archived"
+  grep -q OLD_FACT "$sd/memory.md" && fail "stale entry still in memory"
+  grep -q PINNED_FACT "$sd/memory.md" || fail "pinned entry lost"
+  "$mem" reviewed quant >/dev/null
+  case "$("$mem" review quant)" in *"review not due"*) ;; *) fail "cadence ignored after review" ;; esac
+  "$mem" guide quant add "Answer outcome-first" >/dev/null
+  grep -q "Answer outcome-first" "$sd/guide.md" || fail "guide rule not recorded"
+  pass "session memory dedupes, archives stale entries without deleting, honours pins, and tracks review cadence"
+}
+
 test_hook_blocks_prefixed_only() {
   local out
   out=$(printf '{"prompt":">> remember pineapple"}' | "$HOOK")
-  case "$out" in *'"decision": "block"'*"Queued M-0006"*) ;; *) fail "prefixed prompt: $out" ;; esac
+  case "$out" in *'"decision": "block"'*"Queued M-0007"*) ;; *) fail "prefixed prompt: $out" ;; esac
   out=$(printf '{"prompt":"hello, normal chat"}' | "$HOOK")
   [ -z "$out" ] || fail "touched a normal prompt: $out"
   out=$(printf '{"prompt":">> nested"}' | FM_INTAKE_TRIAGE=1 "$HOOK")
@@ -166,8 +207,8 @@ for line in open(sys.argv[1]):
 }
 
 fm_test_run \
-  test_projects_root_links_and_scans \
-  test_projects_root_refuses_real_clones \
+  test_projects_root_records_source_and_scans \
+  test_session_checkout_clones_from_source \
   test_sessions_validate_routes \
   test_session_instructions_reach_the_brief \
   test_capture_needs_no_model \
@@ -177,5 +218,7 @@ fm_test_run \
   test_ack_is_derived_from_target_handled \
   test_check_flags_lost_body \
   test_unroutable_session_fails_visibly \
+  test_answered_decision_is_logged_to_decisions_file \
+  test_session_memory_tiers_decay_and_cadence \
   test_hook_blocks_prefixed_only \
   test_log_is_valid_json_lines
