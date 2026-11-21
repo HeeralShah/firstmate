@@ -7,7 +7,8 @@
 # the original repo byte-identical; the recorded patch restores on its recorded
 # base; a session clone keeps branches that were never pushed; `adopt` needs an
 # explicit branch and never overwrites a differing branch; and a --session
-# brief carries the work ledger.
+# brief carries the work ledger; the user-level card hook loads only a chat's
+# own binding and stays silent inside Firstmate.
 set -euo pipefail
 
 # shellcheck source=tests/lib.sh
@@ -108,11 +109,24 @@ test_session_brief_carries_the_work_ledger() {
   pass "a --session brief carries the work ledger so a worker can restore recorded work"
 }
 
+test_user_hook_reloads_only_bound_chats_outside_firstmate() {
+  local hook="$ROOT/bin/fm-session-card-hook.sh" out
+  out=$(cd "$TMP_ROOT" && printf '{}' | CLAUDE_CODE_SESSION_ID=chat-1 "$hook")
+  case "$out" in *"bound to Firstmate session alpha"*"Trust this over anything remembered"*) ;; *) fail "bound chat got no card: $out" ;; esac
+  out=$(cd "$TMP_ROOT" && printf '{}' | CLAUDE_CODE_SESSION_ID=chat-2 "$hook")
+  [ -z "$out" ] || fail "an unbound chat got the home default injected: $out"
+  out=$(cd "$ROOT" && printf '{}' | CLAUDE_CODE_SESSION_ID=chat-1 "$hook")
+  [ -z "$out" ] || fail "hook duplicated the digest inside Firstmate"
+  pass "the user-level hook reloads the card only for a chat bound in its own right, and stays silent inside Firstmate"
+}
+
 test_skill_is_registered() {
   grep -q '^name: bind-session$' "$ROOT/.agents/skills/bind-session/SKILL.md" || fail "skill frontmatter missing"
   grep -q '^user-invocable: true$' "$ROOT/.agents/skills/bind-session/SKILL.md" || fail "skill not user-invocable"
   grep -q '`/bind-session' "$ROOT/README.md" || fail "skill missing from the README command table"
-  pass "the bind-session skill is user-invocable and listed in the README"
+  grep -q 'ask the captain for the path to their Firstmate repo' "$ROOT/.agents/skills/bind-session/SKILL.md" || fail "skill lacks the ask-for-path fallback"
+  grep -q 'never search the disk' "$ROOT/.agents/skills/bind-session/SKILL.md" || fail "skill lookup is not bounded"
+  pass "the bind-session skill is user-invocable, listed in the README, and finds Firstmate or asks for its path"
 }
 
 fm_test_run \
@@ -123,4 +137,5 @@ fm_test_run \
   test_recorded_patch_restores_on_its_base \
   test_session_clone_keeps_unpushed_branches_and_adopt_is_explicit \
   test_session_brief_carries_the_work_ledger \
+  test_user_hook_reloads_only_bound_chats_outside_firstmate \
   test_skill_is_registered

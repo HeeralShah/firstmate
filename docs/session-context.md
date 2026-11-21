@@ -24,6 +24,7 @@ Two different things can go wrong, and they have different clocks, so they have 
 `/bind-session` (the `bind-session` skill) does this at the start of a chat, from the context given, or mid-chat, from what the chat has established.
 It drafts the instructions, guide, memory and plan, surveys the repos the chat already changed, shows everything for one confirmation, writes the session through the scripts above, and binds the chat.
 `/bind-session <id>` in a new chat resumes an existing session.
+The skill works in a chat opened in any repository. It finds Firstmate from the current directory, `$FM_HOME`, a path saved in `~/.config/firstmate/home`, the repo its user-level link points to, or `~/Projects/firstmate` and `~/firstmate`, validating each candidate. If none is valid, it asks the captain for the path and offers to save it. Outside Firstmate it never runs the session-start digest, so it cannot take the fleet lock.
 
 **Binding.** Claude Code passes each chat's id to hooks and tool shells as `CLAUDE_CODE_SESSION_ID`. `bin/fm-session-bind.sh` writes `state/session-bindings/<chat-id>`, and the session-start digest loads that chat's session card, falling back to `config/active-session`. Two chats in one home can therefore follow two different sessions. `/clear` starts a new chat id, so rebind after it.
 
@@ -35,7 +36,9 @@ It drafts the instructions, guide, memory and plan, surveys the repos the chat a
 Nothing in an original repo is ever moved, stashed, reset, committed or deleted. Uncommitted work is restored by a worker, in its own isolated copy, from the recorded patch and base: `fm-brief.sh --session` includes the ledger.
 Session clones keep the local source as a fetch-only `source` remote, so branches that were never pushed stay reachable.
 
-**Hooks.** No new hook is needed. The existing `SessionStart` hook already runs the digest on startup, `/clear` and compaction and passes the chat id through. The existing `UserPromptSubmit` registration carries the intake hook. Upstream's opt-in `config/stow-guard` Stop hook already asks for `/stow` before compaction on a token threshold.
+**Hooks.** Inside the Firstmate repo no new hook is needed. The existing `SessionStart` hook runs the digest on startup, `/clear` and compaction and passes the chat id through. The existing `UserPromptSubmit` registration carries the intake hook. Upstream's opt-in `config/stow-guard` Stop hook already asks for `/stow` before compaction on a token threshold.
+
+**Outside the Firstmate repo.** A chat in another repo has no Firstmate digest. If the skill is installed for the user (a link at `~/.claude/skills/bind-session`), register `bin/fm-session-card-hook.sh` as a user-level `SessionStart` hook in `~/.claude/settings.json`. It prints the card only for a chat bound in its own right, never the home default, and stays silent inside Firstmate, where the digest already prints it. Without it, a bound chat in another repo needs `/bind-session <id>` again after compaction.
 
 ## The layers of memory
 
