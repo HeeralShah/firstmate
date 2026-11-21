@@ -194,6 +194,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-dashboard.sh`        | Serve the per-session dashboard (progress, decisions by UI, code changes), print a disk-derived state card for rehydration after compaction, or render a static snapshot ([session-context.md](session-context.md)) |
 | `fm-projects-root.sh`    | Record the source folder repos are discovered in (such as `~/Projects`) and scan it for unregistered repos |
 | `fm-session-checkout.sh` | Clone each session's repos to `projects/<repo>/<session>` from the source and build the per-session symlink view |
+| `fm-running.sh`          | Read-only view of everything running now: fleet, sessions and bound chats, pending intake, and local services; takes no lock and changes nothing |
 | `fm-session-bind.sh`     | Bind a chat (by Claude Code's chat id) or the home default to a session, and resolve which session's card the session-start digest loads |
 | `fm-session-card-hook.sh` | User-level `SessionStart` hook that reloads a bound chat's session card in any repository, silent inside Firstmate |
 | `fm-session-work.sh`     | Survey, record (with a patch copy) and, on approval, adopt into the session clone the work a chat already did, never moving or discarding the original |

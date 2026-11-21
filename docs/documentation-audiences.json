@@ -142,6 +142,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/running/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/bind-session/SKILL.md",
       "audience": "agent-runtime"
     },
