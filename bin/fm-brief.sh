@@ -679,6 +679,14 @@ Do not re-ask or contradict these; surface a conflict instead of overriding one.
 
 $(grep '^- ' "$SESSION_DIR/decisions.md" | tail -n 20)"
   fi
+  if [ -r "$SESSION_DIR/work.md" ] && grep -q '^- ' "$SESSION_DIR/work.md"; then
+    TASK_SECTION="$TASK_SECTION
+
+### Session work ledger (where this session's work lives; originals are never moved)
+Restore a recorded patch only inside this task's own isolated copy, from its recorded base; never touch an original location.
+
+$(tail -n 40 "$SESSION_DIR/work.md")"
+  fi
   if [ -r "$SESSION_DIR/memory.md" ] && grep -q '^- ' "$SESSION_DIR/memory.md"; then
     TASK_SECTION="$TASK_SECTION
 

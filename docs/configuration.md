@@ -101,7 +101,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Captain preferences and optional shared captain preferences.
 - Learnings, backlog, briefs, scout reports, optional task status archives, and the optional per-task no-mistakes pipeline-spend ledger.
 - Explicitly installed content-addressed extension packages under `data/extensions/packages/`.
-- Optional sessions: `data/sessions.md` and one folder per session under `data/sessions/<id>/` ([intake.md](intake.md), [session-context.md](session-context.md)).
+- Optional sessions: `data/sessions.md` and one folder per session under `data/sessions/<id>/`, including its work ledger `work.md` and recorded patch copies under `work/` ([intake.md](intake.md), [session-context.md](session-context.md)).
 
 `state/` holds runtime records:
 
@@ -114,6 +114,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - The optional fire-and-forget intake log, message bodies and dashboard snapshot under `state/intake/` (`bin/fm-intake.sh`).
+- Chat-to-session bindings under `state/session-bindings/<chat-id>` (`bin/fm-session-bind.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
@@ -127,7 +128,7 @@ Optional session, intake and dashboard settings, all local and gitignored, are r
 | File | Meaning |
 | --- | --- |
 | `config/projects-source` | Folder repos are discovered in and session clones are made from (`bin/fm-projects-root.sh`); never written to |
-| `config/active-session` | The session this chat belongs to; the session-start digest, including on re-emit after compaction, then prints that session's state card |
+| `config/active-session` | The home's default session, used for a chat with no binding of its own; the session-start digest, including on re-emit after compaction, prints the resolved session's state card |
 | `config/intake-prefix` | Prefix the `UserPromptSubmit` intake hook captures (default `>>`) |
 | `config/intake-triage`, `config/intake-triage-model` | `model` (default) or `rules` for intake triage, and an optional model id |
 | `config/dashboard-port` | Port for `bin/fm-dashboard.sh serve` (default 8787) |

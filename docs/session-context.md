@@ -19,6 +19,24 @@ Two different things can go wrong, and they have different clocks, so they have 
 5. **Keep the card small.** It is capped near 700 words and lists only what is unsettled; detail stays behind pointers.
 6. **Verify at the seams.** `fm-intake.sh check` audits that no captured message is lost or stuck, and a claim in `summary.md` or a worker report is evidence, not truth, until the card's facts agree.
 
+## Turning a chat into a session
+
+`/bind-session` (the `bind-session` skill) does this at the start of a chat, from the context given, or mid-chat, from what the chat has established.
+It drafts the instructions, guide, memory and plan, surveys the repos the chat already changed, shows everything for one confirmation, writes the session through the scripts above, and binds the chat.
+`/bind-session <id>` in a new chat resumes an existing session.
+
+**Binding.** Claude Code passes each chat's id to hooks and tool shells as `CLAUDE_CODE_SESSION_ID`. `bin/fm-session-bind.sh` writes `state/session-bindings/<chat-id>`, and the session-start digest loads that chat's session card, falling back to `config/active-session`. Two chats in one home can therefore follow two different sessions. `/clear` starts a new chat id, so rebind after it.
+
+**Existing work.** A chat may already hold committed and uncommitted work. `bin/fm-session-work.sh` carries it into the session without risk to it:
+- `survey` only reads.
+- `record` writes the ledger `work.md` and a patch copy of uncommitted tracked changes, and lists untracked files without copying them.
+- `adopt` brings named committed branches into the session's own clone through a fetch-only remote, only after the captain approves that exact operation.
+
+Nothing in an original repo is ever moved, stashed, reset, committed or deleted. Uncommitted work is restored by a worker, in its own isolated copy, from the recorded patch and base: `fm-brief.sh --session` includes the ledger.
+Session clones keep the local source as a fetch-only `source` remote, so branches that were never pushed stay reachable.
+
+**Hooks.** No new hook is needed. The existing `SessionStart` hook already runs the digest on startup, `/clear` and compaction and passes the chat id through. The existing `UserPromptSubmit` registration carries the intake hook. Upstream's opt-in `config/stow-guard` Stop hook already asks for `/stow` before compaction on a token threshold.
+
 ## The layers of memory
 
 | Layer | File | Holds | Written by |

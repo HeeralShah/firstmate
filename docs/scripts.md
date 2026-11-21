@@ -194,6 +194,8 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-dashboard.sh`        | Serve the per-session dashboard (progress, decisions by UI, code changes), print a disk-derived state card for rehydration after compaction, or render a static snapshot ([session-context.md](session-context.md)) |
 | `fm-projects-root.sh`    | Record the source folder repos are discovered in (such as `~/Projects`) and scan it for unregistered repos |
 | `fm-session-checkout.sh` | Clone each session's repos to `projects/<repo>/<session>` from the source and build the per-session symlink view |
+| `fm-session-bind.sh`     | Bind a chat (by Claude Code's chat id) or the home default to a session, and resolve which session's card the session-start digest loads |
+| `fm-session-work.sh`     | Survey, record (with a patch copy) and, on approval, adopt into the session clone the work a chat already did, never moving or discarding the original |
 | `fm-session-memory.sh`   | Session durable memory with tiers, decay and review cadence, plus the session guide's dated meta-rules ([session-context.md](session-context.md)) |
 | `fm-mail.sh`             | General-purpose mail plane: read unseen IMAP mail, send one SMTP message, or surface new mail as a `check` wake via `poll` (configuration in the home's gitignored `.env`) |
 | `fm-mail.py`             | The IMAP/SMTP engine behind `fm-mail.sh` |

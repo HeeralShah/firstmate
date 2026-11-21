@@ -4,9 +4,10 @@
 # Layout: $FM_HOME/projects/<repo>/<session> is a full clone owned by that
 # session, so two sessions touching the same repo never share a working tree,
 # index, or branch state. Clones are made with `git clone --local` from the
-# projects source (bin/fm-projects-root.sh) and their `origin` is reset to the
-# source repo's real remote, so a push still goes to the forge and nothing is
-# ever written into the source repo.
+# projects source (bin/fm-projects-root.sh). The clone keeps the local source as
+# a fetch-only remote named `source` (so unpushed source branches stay
+# reachable) and gets `origin` set to the source repo's real remote, so a push
+# still goes to the forge and nothing is ever written into the source repo.
 #
 # A per-session VIEW at data/sessions/<session>/repos/<repo> is a relative
 # symlink to that clone. Point a session home's projects directory at the view
@@ -90,16 +91,16 @@ cmd_create() {
       if [ -n "$base" ] && [ "$(git -C "$dest" rev-parse --abbrev-ref HEAD)" != "$base" ]; then
         git -C "$dest" checkout -q "$base" 2>/dev/null || git -C "$dest" checkout -q -b "$base" "origin/$base"
       fi
+      # The clone's own origin is the LOCAL source. Keep it, renamed `source`, so
+      # branches that exist only in the source (committed but unpushed work)
+      # stay reachable as source/*; then point `origin` at the real remote.
+      git -C "$dest" remote rename origin source
       url=$(git -C "$src/$r" remote get-url origin 2>/dev/null || true)
       if [ -n "$url" ]; then
-        git -C "$dest" remote set-url origin "$url"
-        # origin/* refs were copied from the LOCAL source; refresh them from the
-        # real remote so ahead/behind counts are true. Offline is reported, not fatal.
-        if ! git -C "$dest" fetch -q --prune origin 2>/dev/null; then
-          printf 'warning: could not fetch %s; origin/* in %s reflect the local source until fetched\n' "$url" "$dest" >&2
+        git -C "$dest" remote add origin "$url"
+        if ! git -C "$dest" fetch -q origin 2>/dev/null; then
+          printf 'warning: could not fetch %s; origin/* in %s are absent until fetched\n' "$url" "$dest" >&2
         fi
-      else
-        git -C "$dest" remote remove origin 2>/dev/null || true
       fi
       printf 'created %s (on %s)\n' "$dest" "$(git -C "$dest" rev-parse --abbrev-ref HEAD)"
       made=$((made + 1))
