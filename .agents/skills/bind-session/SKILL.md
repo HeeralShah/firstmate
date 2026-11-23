@@ -99,6 +99,9 @@ Write nothing until the captain confirms, and drop anything they reject.
 4. `$FM/bin/fm-session-work.sh record <id> <path>...` for every surveyed repo.
 5. Only for the adoptions the captain approved: `$FM/bin/fm-session-checkout.sh create <id> <repo>`, then `$FM/bin/fm-session-work.sh adopt <id> <path> --branch <b>...`.
 6. `$FM/bin/fm-session-bind.sh bind <id>` to bind this chat.
+   Binding also registers the `>>` intake hook in this chat's repo or worktree, in its untracked `.claude/settings.local.json`. Existing settings are kept, and the file is excluded from git.
+   Only this chat's own folder needs it: other repos and worktrees in the session never receive the captain's prompts.
+   If the bind reports it refused to edit an unparseable settings file, the chat is not bound: tell the captain which file to fix.
    If no chat id is available, report that and ask whether to make the session the home default (`--home-default`).
 
 ## 7. Verify, then report
@@ -111,7 +114,8 @@ Write nothing until the captain confirms, and drop anything they reject.
    - where each repo's work lives now, and what was deliberately not moved;
    - how to resume in a new chat (`/bind-session <id>`);
    - that running `/compact` now drops this chat's old context, while the session card reloads on its own;
-   - that `$FM/bin/fm-dashboard.sh serve` shows the session.
+   - that `$FM/bin/fm-dashboard.sh serve` shows the session;
+   - that `>>` messages in this chat now go to triage (and which settings file received the hook).
 
 When work resumes, brief workers with `$FM/bin/fm-brief.sh <task> <repo> --session <id>`.
 That brief carries the work ledger, so a worker that must restore uncommitted work starts from the recorded patch and base in its own isolated copy.

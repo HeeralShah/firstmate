@@ -26,8 +26,11 @@ Config in the gitignored `config/`: `intake-triage` (`model`, the default, or `r
 
 ## Sending from chat or a terminal
 
-The hook is registered in this repo's tracked `.claude/settings.json` and deliberately not at user level, so it runs only in Claude Code sessions opened in the firstmate repo.
-It captures only in a BOUND chat: one that `/bind-session` (or `bin/fm-session-bind.sh`) has bound to a session. Every other chat passes straight through, so `>>` in an ordinary chat is never swallowed.
+Claude Code runs a hook only where it is registered: in user settings or in the open project's settings, never per chat. This hook is deliberately not registered at user level.
+In the firstmate repo, the tracked `.claude/settings.json` carries it. In any other repo or worktree, binding a chat there (`/bind-session`, or `bin/fm-session-bind.sh bind`) registers it in that folder's untracked `.claude/settings.local.json`.
+That edit keeps existing settings, writes a backup, refuses an unparseable file, and adds the file to the repo's local `.git/info/exclude`. Unbinding removes Firstmate's entry once no other bound chat there needs it.
+Only the folder a bound chat is open in needs the hook; a session's other repos and worktrees never receive the captain's prompts.
+It captures only in a BOUND chat, so even where it is registered, every unbound chat passes straight through and `>>` in an ordinary chat is never swallowed.
 
 A prompt in a bound chat that starts with `>>` (change it in `config/intake-prefix`) is captured and blocked, and you see `Queued M-0042`; every other prompt goes to Claude untouched.
 The check is a plain string comparison, and the hook fails open: if capture fails, the prompt reaches Claude and the error is shown.

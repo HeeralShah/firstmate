@@ -34,6 +34,7 @@ git -C "$SRC/repoa" add c
 printf 'junk\n' >"$SRC/repoa/untracked.txt"
 
 export FM_HOME="$HOME_DIR"
+STATE_DIR="$HOME_DIR/state"
 export FM_SNAPSHOT_BIN="$TMP_ROOT/snap.sh"
 printf '#!/usr/bin/env bash\necho "{\\"tasks\\":[],\\"backlog\\":{\\"records\\":[]}}"\n' >"$FM_SNAPSHOT_BIN"
 chmod +x "$FM_SNAPSHOT_BIN"
@@ -120,6 +121,39 @@ test_user_hook_reloads_only_bound_chats_outside_firstmate() {
   pass "the user-level hook reloads the card only for a chat bound in its own right, and stays silent inside Firstmate"
 }
 
+test_bind_registers_the_intake_hook_in_the_chats_repo() {
+  local r="$TMP_ROOT/chatrepo" wt="$TMP_ROOT/chatrepo-wt" settings out
+  git init -q -b main "$r"
+  git -C "$r" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  mkdir -p "$r/.claude"
+  printf '{\n  "permissions": {"allow": ["Bash(ls)"]},\n  "hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/their/own.sh"}]}]}\n}\n' >"$r/.claude/settings.local.json"
+  settings="$r/.claude/settings.local.json"
+  CLAUDE_CODE_SESSION_ID=rchat-1 "$BIND" bind alpha --repo "$r" >/dev/null
+  grep -q 'fm-intake-hook.sh' "$settings" || fail "hook not registered in the chat's repo"
+  grep -q '/their/own.sh' "$settings" && grep -q 'Bash(ls)' "$settings" || fail "existing settings were not kept"
+  [ -f "$settings.bak-firstmate" ] || fail "no backup written before editing"
+  git -C "$r" check-ignore -q .claude/settings.local.json || fail "settings.local.json not excluded from git"
+  CLAUDE_CODE_SESSION_ID=rchat-1 "$BIND" bind alpha --repo "$r" >/dev/null
+  [ "$(grep -c 'fm-intake-hook.sh' "$settings")" = 1 ] || fail "re-binding added a second entry"
+  git -C "$r" worktree add -q "$wt" -b wt-branch
+  CLAUDE_CODE_SESSION_ID=rchat-wt "$BIND" bind alpha --repo "$wt" >/dev/null
+  grep -q 'fm-intake-hook.sh' "$wt/.claude/settings.local.json" || fail "a worktree chat did not get its own registration"
+  CLAUDE_CODE_SESSION_ID=rchat-2 "$BIND" bind alpha --repo "$r" >/dev/null
+  CLAUDE_CODE_SESSION_ID=rchat-1 "$BIND" unbind >/dev/null
+  grep -q 'fm-intake-hook.sh' "$settings" || fail "unbinding one chat removed the hook another bound chat in that repo needs"
+  CLAUDE_CODE_SESSION_ID=rchat-2 "$BIND" unbind >/dev/null
+  grep -q 'fm-intake-hook.sh' "$settings" && fail "unbinding the last chat left the hook"
+  grep -q '/their/own.sh' "$settings" && grep -q 'Bash(ls)' "$settings" || fail "unbind damaged the captain's own settings"
+  printf '{ not json' >"$TMP_ROOT/bad.json"
+  mkdir -p "$TMP_ROOT/badrepo/.claude" && cp "$TMP_ROOT/bad.json" "$TMP_ROOT/badrepo/.claude/settings.local.json"
+  if out=$(CLAUDE_CODE_SESSION_ID=rchat-3 "$BIND" bind alpha --repo "$TMP_ROOT/badrepo" 2>&1); then fail "bound despite unparseable settings: $out"; fi
+  cmp -s "$TMP_ROOT/bad.json" "$TMP_ROOT/badrepo/.claude/settings.local.json" || fail "unparseable settings were rewritten"
+  [ ! -e "$STATE_DIR/session-bindings/rchat-3" ] || fail "chat was bound although its hook could not be registered"
+  out=$(CLAUDE_CODE_SESSION_ID=rchat-4 "$BIND" bind alpha --repo "$ROOT" 2>&1)
+  case "$out" in *"tracked settings already carry"*) ;; *) fail "Firstmate repo was not skipped: $out" ;; esac
+  pass "bind registers the intake hook in the chat's own repo or worktree, keeps existing settings, and unbind removes it only after the last chat there"
+}
+
 test_skill_is_registered() {
   grep -q '^name: bind-session$' "$ROOT/.agents/skills/bind-session/SKILL.md" || fail "skill frontmatter missing"
   grep -q '^user-invocable: true$' "$ROOT/.agents/skills/bind-session/SKILL.md" || fail "skill not user-invocable"
@@ -138,4 +172,5 @@ fm_test_run \
   test_session_clone_keeps_unpushed_branches_and_adopt_is_explicit \
   test_session_brief_carries_the_work_ledger \
   test_user_hook_reloads_only_bound_chats_outside_firstmate \
+  test_bind_registers_the_intake_hook_in_the_chats_repo \
   test_skill_is_registered

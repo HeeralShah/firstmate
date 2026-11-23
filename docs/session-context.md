@@ -36,6 +36,8 @@ The skill works in a chat opened in any repository. It finds Firstmate from the 
 Nothing in an original repo is ever moved, stashed, reset, committed or deleted. Uncommitted work is restored by a worker, in its own isolated copy, from the recorded patch and base: `fm-brief.sh --session` includes the ledger.
 Session clones keep the local source as a fetch-only `source` remote, so branches that were never pushed stay reachable.
 
+**Intake in a bound chat.** Binding a chat registers the `>>` intake hook in that chat's own repo or worktree, in its untracked `.claude/settings.local.json`, because Claude Code cannot register a hook per chat. Unbinding removes it once no other bound chat there needs it; [intake.md](intake.md) has the details.
+
 **Hooks.** Inside the Firstmate repo no new hook is needed. The existing `SessionStart` hook runs the digest on startup, `/clear` and compaction and passes the chat id through. The existing `UserPromptSubmit` registration carries the intake hook. Upstream's opt-in `config/stow-guard` Stop hook already asks for `/stow` before compaction on a token threshold.
 
 **Outside the Firstmate repo.** A chat in another repo has no Firstmate digest. If the skill is installed for the user (a link at `~/.claude/skills/bind-session`), register `bin/fm-session-card-hook.sh` as a user-level `SessionStart` hook in `~/.claude/settings.json`. It prints the card only for a chat bound in its own right, never the home default, and stays silent inside Firstmate, where the digest already prints it. Without it, a bound chat in another repo needs `/bind-session <id>` again after compaction.
