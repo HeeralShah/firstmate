@@ -275,13 +275,15 @@ test_hook_captures_only_in_bound_chats() {
   printf 'quant\n' >"$HOME_DIR/state/session-bindings/bound-chat"
   out=$(printf '{"session_id":"bound-chat","prompt":">> remember pineapple"}' | "$HOOK")
   case "$out" in *'"decision": "block"'*"Queued M-"*) ;; *) fail "bound chat prefixed prompt not captured: $out" ;; esac
+  case "$out" in *'"systemMessage": "Queued M-'*) ;; *) fail "no systemMessage for surfaces that hide the reason: $out" ;; esac
+  tail -1 "$HOME_DIR/state/intake/log.jsonl" | grep -q '"forced_session":"quant"' || fail "bound chat message not routed to its session"
   out=$(printf '{"session_id":"unbound-chat","prompt":">> an ordinary chat must not capture"}' | "$HOOK")
   [ -z "$out" ] || fail "an UNBOUND chat captured a prefixed prompt: $out"
   out=$(printf '{"session_id":"bound-chat","prompt":"hello, normal chat"}' | "$HOOK")
   [ -z "$out" ] || fail "touched a normal prompt: $out"
   out=$(printf '{"session_id":"bound-chat","prompt":">> nested"}' | FM_INTAKE_TRIAGE=1 "$HOOK")
   [ -z "$out" ] || fail "hook recursed inside the triage call"
-  pass "the hook captures prefixed prompts only in a bound chat; unbound chats, normal prompts and triage pass through"
+  pass "the hook captures only in a bound chat, routes to that chat's session, and tells the user the queued id; unbound chats, normal prompts and triage pass through"
 }
 
 test_log_is_valid_json_lines() {

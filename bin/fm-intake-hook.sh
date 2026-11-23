@@ -47,6 +47,10 @@ except Exception:
 ' 2>/dev/null)
 case "$chat" in ''|.*|*[!A-Za-z0-9._-]*) exit 0 ;; esac
 [ -s "$STATE/session-bindings/$chat" ] || exit 0
+# The bound chat's session owns its messages: they are routed there, not triaged
+# to whichever home the model guesses.
+bound=$(sed -n '1{s/[[:space:]]*$//;p;q;}' "$STATE/session-bindings/$chat")
+case "$bound" in ''|.*|*[!A-Za-z0-9._-]*) exit 0 ;; esac
 
 prefix="${FM_INTAKE_PREFIX:-}"
 if [ -z "$prefix" ] && [ -r "$FM_HOME/config/intake-prefix" ]; then
@@ -74,7 +78,7 @@ key=${parsed%%$'\n'*}
 body=${parsed#*$'\n'}
 [ -n "$body" ] || exit 0
 
-if out=$(printf '%s' "$body" | "$SELF_DIR/fm-intake.sh" add --source hook --dedupe-key "$key" - 2>&1); then
+if out=$(printf '%s' "$body" | "$SELF_DIR/fm-intake.sh" add --source hook --session "$bound" --dedupe-key "$key" - 2>&1); then
   reason="$out"
   decision=block
 else
@@ -84,4 +88,7 @@ else
 fi
 printf '%s' "$reason" | python3 -c '
 import json, sys
-print(json.dumps({"decision": "block", "reason": sys.stdin.read().strip()}))'
+r = sys.stdin.read().strip()
+# reason is shown where the harness shows it; systemMessage reaches the user in
+# surfaces that only say "Prompt blocked by hook".
+print(json.dumps({"decision": "block", "reason": r, "systemMessage": r + " for triage"}))'
